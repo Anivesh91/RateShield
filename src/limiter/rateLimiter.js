@@ -20,8 +20,13 @@ let cleanupInterval = null;
 const DEFAULT_CLEANUP_INTERVAL_MS = 60_000;
 
 /**
- * Scans the in-memory Map and removes all records whose time windows
- * have expired, preventing memory leaks over long-running server processes.
+ * Expired State / Stale Entry Cleanup:
+ * Scans the in-memory Map and deletes records whose Fixed Windows
+ * have elapsed. This prevents expired rate-limit entries from accumulating
+ * indefinitely over long-running server processes.
+ *
+ * NOTE: This does not guarantee strictly bounded memory under massive concurrent
+ * unique IP floods within an active window, but ensures expired records are evicted.
  */
 export function cleanupExpiredRecords() {
   const now = Date.now();
