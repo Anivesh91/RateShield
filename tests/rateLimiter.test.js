@@ -229,4 +229,27 @@ describe('SmartRate — Fixed Window Rate Limiter Suite', () => {
       assert.equal(freshRes.headers['ratelimit-remaining'], '1');
     });
   });
+
+  describe('Part 5: Demo Endpoints Full Policy & Header Verification', () => {
+    it('verifies /api/public enforces exactly 10 requests allowance', async () => {
+      const testIp = '10.0.0.7';
+
+      for (let i = 1; i <= 10; i++) {
+        const res = await request(demoApp)
+          .get('/api/public')
+          .set('X-Forwarded-For', testIp);
+        assert.equal(res.status, 200);
+        assert.equal(res.headers['ratelimit-remaining'], String(10 - i));
+      }
+
+      // 11th request must be blocked
+      const blocked = await request(demoApp)
+        .get('/api/public')
+        .set('X-Forwarded-For', testIp);
+
+      assert.equal(blocked.status, 429);
+      assert.equal(blocked.headers['ratelimit-remaining'], '0');
+      assert.ok(Number(blocked.headers['retry-after']) > 0);
+    });
+  });
 });
