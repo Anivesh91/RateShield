@@ -1,0 +1,26 @@
+{
+  "name": "smart-rate",
+  "version": "1.0.0",
+  "description": "Reusable in-memory Fixed Window rate limiting middleware for Express.js",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": "./src/index.js",
+  "scripts": {
+    "dev": "node --watch examples/express-demo/server.js",
+    "start": "node examples/express-demo/server.js"
+  },
+  "keywords": [
+    "rate-limiter",
+    "express",
+    "middleware",
+    "fixed-window",
+    "in-memory",
+    "smart-rate"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
