@@ -3,11 +3,53 @@
  */
 
 /**
- * Shared in-memory Map storing rate limiting records.
+ * Shared in-memory Map storing active Fixed Window state.
  * KEY:   "${clientIp}:${routePath}"
- * VALUE: { count: number, windowStart: number }
+ * VALUE: { count: number, windowStart: number, windowMs: number }
  */
 const store = new Map();
+
+/**
+ * Singleton timer reference for the background memory cleanup.
+ */
+let cleanupInterval = null;
+
+/**
+ * Default interval in milliseconds for running the memory cleanup sweeper (60 seconds).
+ */
+const DEFAULT_CLEANUP_INTERVAL_MS = 60_000;
+
+/**
+ * Scans the in-memory Map and removes all records whose time windows
+ * have expired, preventing memory leaks over long-running server processes.
+ */
+export function cleanupExpiredRecords() {
+  const now = Date.now();
+  for (const [key, record] of store.entries()) {
+    if (now - record.windowStart >= record.windowMs) {
+      store.delete(key);
+    }
+  }
+}
+
+/**
+ * Ensures a single background interval is active to periodically sweep
+ * expired entries from memory. Uses timer.unref() so it does not block process exit.
+ *
+ * @param {number} [intervalMs=60000]
+ */
+function ensureCleanupTimer(intervalMs = DEFAULT_CLEANUP_INTERVAL_MS) {
+  if (!cleanupInterval) {
+    cleanupInterval = setInterval(() => {
+      cleanupExpiredRecords();
+    }, intervalMs);
+
+    // unref() tells Node.js event loop not to wait for this timer to exit the process
+    if (typeof cleanupInterval.unref === 'function') {
+      cleanupInterval.unref();
+    }
+  }
+}
 
 /**
  * Validates configuration options passed to the rateLimiter factory.
@@ -67,6 +109,9 @@ export function rateLimiter(options = {}) {
 
   const { limit, windowMs } = options;
 
+  // Ensure the shared background cleanup timer is active
+  ensureCleanupTimer();
+
   return function rateLimiterMiddleware(req, res, next) {
     const now = Date.now();
     const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
@@ -75,25 +120,27 @@ export function rateLimiter(options = {}) {
 
     const record = store.get(key);
 
-    // CASE 1: No record exists for this client + route
+    // CASE 1: No record exists for this client + route -> Initialize
     if (!record) {
       store.set(key, {
         count: 1,
-        windowStart: now
+        windowStart: now,
+        windowMs
       });
       return next();
     }
 
     const elapsedTime = now - record.windowStart;
 
-    // CASE 2: Active window has expired -> Reset counter and window
+    // CASE 2: Active window has expired -> Reset counter and windowStart
     if (elapsedTime >= windowMs) {
       record.count = 1;
       record.windowStart = now;
+      record.windowMs = windowMs;
       return next();
     }
 
-    // CASE 3: Window is still active and quota is available
+    // CASE 3: Window is still active and quota is available -> Increment
     if (record.count < limit) {
       record.count += 1;
       return next();
