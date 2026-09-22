@@ -101,6 +101,28 @@ function getRouteIdentifier(req) {
 }
 
 /**
+ * Sets standard rate limiting headers on the HTTP response.
+ *
+ * @param {import('express').Response} res
+ * @param {Object} headers
+ * @param {number} headers.limit - Configured request limit.
+ * @param {number} headers.remaining - Quota remaining in current window.
+ * @param {number} headers.reset - Seconds until current window resets.
+ * @param {number} [headers.retryAfter] - Seconds to wait before retrying (on 429).
+ */
+function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
+  if (typeof res.setHeader === 'function') {
+    res.setHeader('RateLimit-Limit', String(limit));
+    res.setHeader('RateLimit-Remaining', String(Math.max(0, remaining)));
+    res.setHeader('RateLimit-Reset', String(Math.max(0, reset)));
+
+    if (retryAfter !== undefined) {
+      res.setHeader('Retry-After', String(Math.max(1, retryAfter)));
+    }
+  }
+}
+
+/**
  * Middleware factory that creates a rate limiter middleware.
  *
  * @param {Object} options
@@ -132,6 +154,11 @@ export function rateLimiter(options = {}) {
         windowStart: now,
         windowMs
       });
+
+      const remaining = limit - 1;
+      const reset = Math.ceil(windowMs / 1000);
+      setRateLimitHeaders(res, { limit, remaining, reset });
+
       return next();
     }
 
@@ -142,25 +169,40 @@ export function rateLimiter(options = {}) {
       record.count = 1;
       record.windowStart = now;
       record.windowMs = windowMs;
+
+      const remaining = limit - 1;
+      const reset = Math.ceil(windowMs / 1000);
+      setRateLimitHeaders(res, { limit, remaining, reset });
+
       return next();
     }
 
     // CASE 3: Window is still active and quota is available -> Increment
     if (record.count < limit) {
       record.count += 1;
+
+      const remaining = limit - record.count;
+      const reset = Math.ceil((record.windowStart + windowMs - now) / 1000);
+      setRateLimitHeaders(res, { limit, remaining, reset });
+
       return next();
     }
 
     // CASE 4: Rate limit reached or exceeded -> HTTP 429 Too Many Requests
-    const retryAfterSeconds = Math.max(
-      1,
-      Math.ceil((record.windowStart + windowMs - now) / 1000)
-    );
+    const reset = Math.max(1, Math.ceil((record.windowStart + windowMs - now) / 1000));
+    const retryAfter = reset;
+
+    setRateLimitHeaders(res, {
+      limit,
+      remaining: 0,
+      reset,
+      retryAfter
+    });
 
     return res.status(429).json({
       success: false,
       message: 'Too many requests',
-      retryAfter: retryAfterSeconds
+      retryAfter
     });
   };
 }
