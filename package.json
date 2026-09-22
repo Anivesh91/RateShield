@@ -7,7 +7,8 @@
   "exports": "./src/index.js",
   "scripts": {
     "dev": "node --watch examples/express-demo/server.js",
-    "start": "node examples/express-demo/server.js"
+    "start": "node examples/express-demo/server.js",
+    "test": "node --test tests/rateLimiter.test.js"
   },
   "keywords": [
     "rate-limiter",
@@ -22,5 +23,8 @@
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "supertest": "^7.3.0"
   }
 }
