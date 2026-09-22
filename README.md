@@ -1,8 +1,10 @@
 # SmartRate
 
-A lightweight, zero-dependency in-memory rate limiting middleware for Express.js using the Fixed Window algorithm.
+A lightweight, in-memory rate limiting middleware for Express.js using the Fixed Window algorithm. SmartRate has zero production runtime dependencies (requiring only Express as a peer dependency).
 
-SmartRate protects backend endpoints against brute-force attacks and request spam by throttling requests per IP address across isolated routes.
+SmartRate helps mitigate brute-force attempts and request spam by throttling requests per IP address across isolated routes and HTTP methods.
+
+> **Repository Note:** The project is named **SmartRate** (npm package `smart-rate`), hosted in the [RateShield](https://github.com/Anivesh91/RateShield) repository.
 
 ```javascript
 import express from 'express';
@@ -21,14 +23,14 @@ app.post(
 
 ## Why SmartRate?
 
-Most existing rate-limit packages either bundle heavy distributed store drivers or pull in complex dependency trees. SmartRate was built to provide a clean, readable, dependency-free in-memory rate limiter that adheres to modern ES Modules and handles route isolation out of the box.
+Most existing rate-limit packages either bundle heavy distributed store drivers or pull in complex dependency trees. SmartRate was built to provide a clean, readable in-memory rate limiter with zero production runtime dependencies that adheres to modern ES Modules and handles route isolation out of the box.
 
 ### Features
 - **Fixed Window Counter**: Strict boundary enforcement with zero off-by-one errors.
-- **Route Isolation**: Independent counters for different routes on the same IP (`127.0.0.1:/api/login` vs `127.0.0.1:/api/test`).
+- **Method & Route Isolation**: Independent counters for different routes and HTTP methods on the same IP (`127.0.0.1:GET:/api/users` vs `127.0.0.1:POST:/api/users`).
 - **Query Stripping**: Automatically normalizes route paths so `/items?page=1` and `/items?page=2` share the same quota bucket.
 - **Fail-Fast Validation**: Throws descriptive `RangeError` / `TypeError` at startup if misconfigured.
-- **Standard Headers**: Emits `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, and `Retry-After`.
+- **Rate-Limit Response Headers**: Emits `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, and `Retry-After`.
 - **Stale Entry Sweeper**: Uses `timer.unref()` to periodically evict expired records without hanging the Node.js event loop during test teardown or graceful shutdowns.
 
 ---
@@ -64,7 +66,7 @@ smart-rate-limiter/
 flowchart TD
     Client([HTTP Request]) --> Router[Express Route]
     Router --> Middleware[SmartRate Middleware]
-    Middleware --> KeyGen["Extract IP (req.ip) + Route Path"]
+    Middleware --> KeyGen["Extract IP (req.ip) + Method + Route Path"]
     KeyGen --> StoreLookup["Map Lookup (store.get)"]
     
     StoreLookup --> CheckWindow{"Window Expired or Missing?"}
@@ -87,12 +89,12 @@ Runtime state is held in a module-level `Map`:
 
 ```javascript
 Map {
-  "127.0.0.1:/api/test"  => { count: 3, windowStart: 1727000000000, windowMs: 60000 },
-  "127.0.0.1:/api/login" => { count: 1, windowStart: 1727000010000, windowMs: 60000 }
+  "127.0.0.1:GET:/api/test"  => { count: 3, windowStart: 1727000000000, windowMs: 60000 },
+  "127.0.0.1:POST:/api/login" => { count: 1, windowStart: 1727000010000, windowMs: 60000 }
 }
 ```
 
-- Keys combine `clientIp` and normalized route path (`req.originalUrl.split('?')[0]`).
+- Keys combine `clientIp`, `req.method`, and the normalized route path (`req.originalUrl.split('?')[0]`).
 - Records store `windowMs` so a single background sweeper can clean records across different route policies.
 
 ---
@@ -102,8 +104,8 @@ Map {
 ### Installation
 
 ```bash
-git clone <repo-url>
-cd smart-rate-limiter
+git clone https://github.com/Anivesh91/RateShield.git
+cd RateShield
 npm install
 ```
 
@@ -122,9 +124,9 @@ The demo runs at `http://localhost:3000` with three distinct policies:
 
 ---
 
-## Response Headers
+## Rate-Limit Response Headers
 
-Every rate-limited route attaches informative headers:
+Every rate-limited route attaches informative response metadata:
 
 | Header | Example | Description |
 | :--- | :--- | :--- |
@@ -161,23 +163,33 @@ npm test
 ```
 
 ### Verified Test Cases
-- Fail-fast option validation (`limit <= 0`, non-integer, non-finite `windowMs`).
-- Exact limit boundary: requests 1–5 pass (200), request 6 blocks (429).
-- `RateLimit-Remaining` never drops below 0.
-- Route isolation: `/api/login` quota depletion does not affect `/api/test`.
-- Query parameter stripping prevents quota bypass via query tampering.
-- Window expiration: counter resets to 1 after time window elapses.
-- Stale entry cleanup: background interval evicts expired records.
+1. Fail-fast option validation (`limit <= 0`, non-integer, non-finite `windowMs`).
+2. First request is allowed.
+3. Exactly N requests are allowed.
+4. Request N+1 returns 429.
+5. `RateLimit-Limit` is correct.
+6. `RateLimit-Remaining` decreases correctly.
+7. `RateLimit-Remaining` never drops below 0 across multiple blocked requests.
+8. `RateLimit-Reset` countdown exists.
+9. `Retry-After` exists on blocked responses.
+10. Window expiration allows requests again.
+11. Different routes are isolated.
+12. Query parameters do not create separate quota buckets.
+13. Different client IPs on the same route are strictly isolated.
+14. GET and POST on the same path maintain independent rate-limit counters.
+15. `cleanupExpiredRecords()` actually evicts expired records from memory.
+16. Demo endpoints enforce their configured limits accurately.
 
 ---
 
 ## Current Limitations & Roadmap
 
-### Current MVP Constraints
+### Current v1 Constraints
 - **In-Memory / Volatile**: State is stored in RAM and resets when the Node process restarts.
 - **Single Process**: Multiple cluster workers or server instances do not share state.
-- **Fixed Window Boundary Bursts**: Up to $2 \times limit$ requests can theoretically pass if sent directly across a window boundary (e.g. at 00:59 and 01:01).
+- **Fixed Window Boundary Bursts**: A burst can occur around a client's window boundary when requests are sent immediately before and after that window resets.
 - **IP Identification**: Behind reverse proxies (Nginx, Cloudflare, AWS ALB), Express `trust proxy` must be properly configured to prevent IP spoofing.
+- **Same Method + Route Multi-Policy Stacking**: Because the shared store keys on `IP:method:route`, attaching multiple distinct rateLimiter() instances to the exact same method and route path would share state.
 
 ### Roadmap (v2)
 - Redis backing via `ioredis` for multi-instance distributed deployments.
