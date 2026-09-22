@@ -3,6 +3,13 @@
  */
 
 /**
+ * Shared in-memory Map storing rate limiting records.
+ * KEY:   "${clientIp}:${routePath}"
+ * VALUE: { count: number, windowStart: number }
+ */
+const store = new Map();
+
+/**
  * Validates configuration options passed to the rateLimiter factory.
  *
  * @param {Object} options
@@ -33,6 +40,20 @@ function validateOptions(options) {
 }
 
 /**
+ * Resolves a stable route identifier from the request object,
+ * stripping query parameters.
+ *
+ * @param {import('express').Request} req
+ * @returns {string} Clean route path (e.g. "/api/login")
+ */
+function getRouteIdentifier(req) {
+  if (req.originalUrl) {
+    return req.originalUrl.split('?')[0];
+  }
+  return `${req.baseUrl || ''}${req.path || ''}` || '/';
+}
+
+/**
  * Middleware factory that creates a rate limiter middleware.
  *
  * @param {Object} options
@@ -47,7 +68,48 @@ export function rateLimiter(options = {}) {
   const { limit, windowMs } = options;
 
   return function rateLimiterMiddleware(req, res, next) {
-    return next();
+    const now = Date.now();
+    const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+    const routeKey = getRouteIdentifier(req);
+    const key = `${clientIp}:${routeKey}`;
+
+    const record = store.get(key);
+
+    // CASE 1: No record exists for this client + route
+    if (!record) {
+      store.set(key, {
+        count: 1,
+        windowStart: now
+      });
+      return next();
+    }
+
+    const elapsedTime = now - record.windowStart;
+
+    // CASE 2: Active window has expired -> Reset counter and window
+    if (elapsedTime >= windowMs) {
+      record.count = 1;
+      record.windowStart = now;
+      return next();
+    }
+
+    // CASE 3: Window is still active and quota is available
+    if (record.count < limit) {
+      record.count += 1;
+      return next();
+    }
+
+    // CASE 4: Rate limit reached or exceeded -> HTTP 429 Too Many Requests
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((record.windowStart + windowMs - now) / 1000)
+    );
+
+    return res.status(429).json({
+      success: false,
+      message: 'Too many requests',
+      retryAfter: retryAfterSeconds
+    });
   };
 }
 
