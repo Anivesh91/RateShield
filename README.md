@@ -1,5 +1,6 @@
 # SmartRate
 
+
 A lightweight, in-memory rate limiting middleware for Express.js using the Fixed Window algorithm. SmartRate has zero production runtime dependencies (requiring only Express as a peer dependency).
 
 SmartRate helps mitigate brute-force attempts and request spam by throttling requests per IP address across isolated routes and HTTP methods.
