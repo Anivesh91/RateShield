@@ -3,74 +3,57 @@ import assert from 'node:assert/strict';
 import request from 'supertest';
 import express from 'express';
 import { rateLimiter } from '../src/index.js';
-import demoApp from '../examples/express-demo/app.js';
+import demoRoutes from '../examples/express-demo/routes.js';
 import { cleanupExpiredRecords } from '../src/limiter/rateLimiter.js';
 
-describe('SmartRate — Fixed Window Rate Limiter Suite', () => {
+/**
+ * Helper to build an Express app configured with trust proxy for test-only IP spoofing.
+ * Production/demo app keeps its own configuration without hardcoded trust proxy.
+ */
+function createTestApp() {
+  const app = express();
+  app.set('trust proxy', true);
+  app.use(express.json());
+  return app;
+}
 
-  describe('Part 1: Option Validation (Fail-Fast)', () => {
+describe('SmartRate v1 — Test Suite', () => {
+
+  describe('Option Validation (Fail-Fast)', () => {
     it('throws RangeError when limit is 0, negative, or not an integer', () => {
-      assert.throws(
-        () => rateLimiter({ limit: 0, windowMs: 60000 }),
-        { name: 'RangeError' }
-      );
-      assert.throws(
-        () => rateLimiter({ limit: -5, windowMs: 60000 }),
-        { name: 'RangeError' }
-      );
-      assert.throws(
-        () => rateLimiter({ limit: '5', windowMs: 60000 }),
-        { name: 'RangeError' }
-      );
-      assert.throws(
-        () => rateLimiter({ limit: 5.5, windowMs: 60000 }),
-        { name: 'RangeError' }
-      );
+      assert.throws(() => rateLimiter({ limit: 0, windowMs: 60000 }), { name: 'RangeError' });
+      assert.throws(() => rateLimiter({ limit: -5, windowMs: 60000 }), { name: 'RangeError' });
+      assert.throws(() => rateLimiter({ limit: '5', windowMs: 60000 }), { name: 'RangeError' });
+      assert.throws(() => rateLimiter({ limit: 5.5, windowMs: 60000 }), { name: 'RangeError' });
     });
 
     it('throws RangeError when windowMs is 0, negative, or non-finite', () => {
-      assert.throws(
-        () => rateLimiter({ limit: 5, windowMs: 0 }),
-        { name: 'RangeError' }
-      );
-      assert.throws(
-        () => rateLimiter({ limit: 5, windowMs: -100 }),
-        { name: 'RangeError' }
-      );
-      assert.throws(
-        () => rateLimiter({ limit: 5, windowMs: Infinity }),
-        { name: 'RangeError' }
-      );
-      assert.throws(
-        () => rateLimiter({ limit: 5, windowMs: '60000' }),
-        { name: 'RangeError' }
-      );
+      assert.throws(() => rateLimiter({ limit: 5, windowMs: 0 }), { name: 'RangeError' });
+      assert.throws(() => rateLimiter({ limit: 5, windowMs: -100 }), { name: 'RangeError' });
+      assert.throws(() => rateLimiter({ limit: 5, windowMs: Infinity }), { name: 'RangeError' });
+      assert.throws(() => rateLimiter({ limit: 5, windowMs: '60000' }), { name: 'RangeError' });
     });
 
     it('throws TypeError when options is not an object', () => {
-      assert.throws(
-        () => rateLimiter(null),
-        { name: 'TypeError' }
-      );
+      assert.throws(() => rateLimiter(null), { name: 'TypeError' });
     });
   });
 
-  describe('Part 2: Fixed Window Enforcement & Boundary Handling', () => {
-    it('allows requests 1 through 5 and blocks request 6 with HTTP 429', async () => {
-      const app = express();
+  describe('Fixed Window Enforcement & Boundary Handling', () => {
+    it('allows requests 1 through N (first allowed, exactly N allowed) and blocks N+1 with 429', async () => {
+      const app = createTestApp();
       app.get(
-        '/test-limit',
+        '/test-boundary',
         rateLimiter({ limit: 5, windowMs: 60_000 }),
         (req, res) => res.status(200).json({ success: true })
       );
 
-      // Unique IP to ensure isolated test state
-      const testIp = '10.0.0.1';
+      const testIp = '192.168.1.50';
 
       // Requests 1 through 5 must all succeed (200 OK)
       for (let i = 1; i <= 5; i++) {
         const response = await request(app)
-          .get('/test-limit')
+          .get('/test-boundary')
           .set('X-Forwarded-For', testIp);
 
         assert.equal(response.status, 200);
@@ -80,9 +63,9 @@ describe('SmartRate — Fixed Window Rate Limiter Suite', () => {
         assert.ok(Number(response.headers['ratelimit-reset']) > 0);
       }
 
-      // Request 6 must be blocked with HTTP 429
+      // Request 6 (N+1) must return HTTP 429 Too Many Requests
       const blockedResponse = await request(app)
-        .get('/test-limit')
+        .get('/test-boundary')
         .set('X-Forwarded-For', testIp);
 
       assert.equal(blockedResponse.status, 429);
@@ -96,22 +79,22 @@ describe('SmartRate — Fixed Window Rate Limiter Suite', () => {
       assert.ok(Number(blockedResponse.headers['retry-after']) > 0);
     });
 
-    it('remaining header never drops below 0 on multiple blocked requests', async () => {
-      const app = express();
+    it('ensures remaining header never drops below 0 across multiple blocked requests', async () => {
+      const app = createTestApp();
       app.get(
         '/test-negative-guard',
         rateLimiter({ limit: 1, windowMs: 60_000 }),
         (req, res) => res.status(200).json({ success: true })
       );
 
-      const testIp = '10.0.0.2';
+      const testIp = '192.168.1.51';
 
       // Request 1: Allowed (Remaining = 0)
       const res1 = await request(app).get('/test-negative-guard').set('X-Forwarded-For', testIp);
       assert.equal(res1.status, 200);
       assert.equal(res1.headers['ratelimit-remaining'], '0');
 
-      // Request 2 & 3: Blocked (Remaining must stay '0', never '-1')
+      // Subsequent blocked requests must stay at '0', never '-1'
       const res2 = await request(app).get('/test-negative-guard').set('X-Forwarded-For', testIp);
       assert.equal(res2.status, 429);
       assert.equal(res2.headers['ratelimit-remaining'], '0');
@@ -122,131 +105,151 @@ describe('SmartRate — Fixed Window Rate Limiter Suite', () => {
     });
   });
 
-  describe('Part 3: Route Isolation on Shared Map', () => {
-    it('tracks limits independently for different routes from the same IP', async () => {
-      const testIp = '10.0.0.3';
+  describe('Isolation: IP, Route & HTTP Method', () => {
+    it('isolates rate-limit buckets between different client IPs on the same route', async () => {
+      const app = createTestApp();
+      app.get(
+        '/api/shared-endpoint',
+        rateLimiter({ limit: 2, windowMs: 60_000 }),
+        (req, res) => res.status(200).json({ success: true })
+      );
 
-      // 1. Exhaust /api/login quota (Limit: 3 requests / 60s)
-      for (let i = 0; i < 3; i++) {
-        const res = await request(demoApp)
-          .post('/api/login')
-          .set('X-Forwarded-For', testIp);
-        assert.equal(res.status, 200);
-      }
+      const ipA = '172.16.10.1';
+      const ipB = '172.16.10.2';
 
-      // 4th login attempt must be 429 blocked
-      const loginBlocked = await request(demoApp)
-        .post('/api/login')
-        .set('X-Forwarded-For', testIp);
-      assert.equal(loginBlocked.status, 429);
+      // IP A uses full quota
+      await request(app).get('/api/shared-endpoint').set('X-Forwarded-For', ipA);
+      await request(app).get('/api/shared-endpoint').set('X-Forwarded-For', ipA);
+      const ipABlocked = await request(app).get('/api/shared-endpoint').set('X-Forwarded-For', ipA);
+      assert.equal(ipABlocked.status, 429);
 
-      // 2. Immediately call /api/test (Limit: 5 requests / 60s) with same IP
-      // It MUST succeed because /test has its own independent counter!
-      const testResponse = await request(demoApp)
-        .get('/api/test')
-        .set('X-Forwarded-For', testIp);
-
-      assert.equal(testResponse.status, 200);
-      assert.equal(testResponse.body.message, 'Test endpoint reached successfully');
-      assert.equal(testResponse.headers['ratelimit-remaining'], '4');
+      // IP B accesses the same route and must be allowed with fresh quota!
+      const ipBResponse = await request(app).get('/api/shared-endpoint').set('X-Forwarded-For', ipB);
+      assert.equal(ipBResponse.status, 200);
+      assert.equal(ipBResponse.headers['ratelimit-remaining'], '1');
     });
 
-    it('strips query parameters so they map to the same route counter', async () => {
-      const app = express();
+    it('isolates counters between different HTTP methods on the exact same route path', async () => {
+      const app = createTestApp();
+      const limiter = rateLimiter({ limit: 2, windowMs: 60_000 });
+
+      app.get('/api/users', limiter, (req, res) => res.json({ method: 'GET' }));
+      app.post('/api/users', limiter, (req, res) => res.json({ method: 'POST' }));
+
+      const clientIp = '10.99.0.1';
+
+      // 1. Exhaust GET /api/users quota (2 requests)
+      await request(app).get('/api/users').set('X-Forwarded-For', clientIp);
+      await request(app).get('/api/users').set('X-Forwarded-For', clientIp);
+      const getBlocked = await request(app).get('/api/users').set('X-Forwarded-For', clientIp);
+      assert.equal(getBlocked.status, 429);
+
+      // 2. Immediately call POST /api/users with the SAME IP -> must succeed!
+      const postResponse = await request(app).post('/api/users').set('X-Forwarded-For', clientIp);
+      assert.equal(postResponse.status, 200);
+      assert.equal(postResponse.headers['ratelimit-remaining'], '1');
+    });
+
+    it('isolates counters between different route paths for the same client IP', async () => {
+      // Create a test app with trust proxy using the demo router logic
+      const app = createTestApp();
+      app.use('/api', demoRoutes);
+
+      const testIp = '10.99.0.2';
+
+      // Exhaust /api/login quota (limit: 3)
+      for (let i = 0; i < 3; i++) {
+        const res = await request(app).post('/api/login').set('X-Forwarded-For', testIp);
+        assert.equal(res.status, 200);
+      }
+      const loginBlocked = await request(app).post('/api/login').set('X-Forwarded-For', testIp);
+      assert.equal(loginBlocked.status, 429);
+
+      // /api/test (limit: 5) for the same IP must remain unaffected!
+      const testRes = await request(app).get('/api/test').set('X-Forwarded-For', testIp);
+      assert.equal(testRes.status, 200);
+      assert.equal(testRes.headers['ratelimit-remaining'], '4');
+    });
+
+    it('strips query parameters so requests map to the same route counter', async () => {
+      const app = createTestApp();
       app.get(
         '/api/products',
         rateLimiter({ limit: 2, windowMs: 60_000 }),
         (req, res) => res.status(200).json({ success: true })
       );
 
-      const testIp = '10.0.0.4';
+      const testIp = '10.99.0.3';
 
-      // Req 1: /api/products?page=1
-      const res1 = await request(app).get('/api/products?page=1').set('X-Forwarded-For', testIp);
-      assert.equal(res1.status, 200);
+      await request(app).get('/api/products?page=1').set('X-Forwarded-For', testIp);
+      await request(app).get('/api/products?page=2').set('X-Forwarded-For', testIp);
 
-      // Req 2: /api/products?page=2
-      const res2 = await request(app).get('/api/products?page=2').set('X-Forwarded-For', testIp);
-      assert.equal(res2.status, 200);
-
-      // Req 3: /api/products?page=3 (Should be blocked, proving query params do not bypass limit)
       const res3 = await request(app).get('/api/products?page=3').set('X-Forwarded-For', testIp);
       assert.equal(res3.status, 429);
     });
   });
 
-  describe('Part 4: Window Expiration, Reset & Stale Entry Cleanup', () => {
-    it('resets request counter to 1 when the window duration has elapsed', async () => {
-      const app = express();
-      // Short 100ms window for reliable testing
+  describe('Window Expiration, Reset & Stale Entry Cleanup', () => {
+    it('resets request counter and allows requests again once the window duration elapses', async () => {
+      const app = createTestApp();
       app.get(
         '/test-expiry',
         rateLimiter({ limit: 1, windowMs: 100 }),
         (req, res) => res.status(200).json({ success: true })
       );
 
-      const testIp = '10.0.0.5';
+      const testIp = '10.99.0.4';
 
-      // Request 1: Allowed
       const res1 = await request(app).get('/test-expiry').set('X-Forwarded-For', testIp);
       assert.equal(res1.status, 200);
 
-      // Request 2 (Immediate): Blocked
       const res2 = await request(app).get('/test-expiry').set('X-Forwarded-For', testIp);
       assert.equal(res2.status, 429);
 
-      // Wait 120ms for window to expire
+      // Wait 120ms for window to elapse
       await new Promise((resolve) => setTimeout(resolve, 120));
 
-      // Request 3 (After expiration): Allowed again!
       const res3 = await request(app).get('/test-expiry').set('X-Forwarded-For', testIp);
       assert.equal(res3.status, 200);
       assert.equal(res3.headers['ratelimit-remaining'], '0');
     });
 
-    it('cleanupExpiredRecords removes stale records from in-memory Map', async () => {
-      const app = express();
+    it('actually evicts expired records from the in-memory Map', async () => {
+      const app = createTestApp();
       app.get(
         '/test-cleanup',
         rateLimiter({ limit: 2, windowMs: 50 }),
         (req, res) => res.status(200).json({ success: true })
       );
 
-      const testIp = '10.0.0.6';
+      const testIp = '10.99.0.5';
 
-      // Populate record in Map
+      // Insert record
       await request(app).get('/test-cleanup').set('X-Forwarded-For', testIp);
 
       // Wait 60ms for window to elapse
       await new Promise((resolve) => setTimeout(resolve, 60));
 
-      // Execute stale entry cleanup
-      cleanupExpiredRecords();
-
-      // Next request will find no record in Map and initialize fresh count = 1
-      const freshRes = await request(app).get('/test-cleanup').set('X-Forwarded-For', testIp);
-      assert.equal(freshRes.status, 200);
-      assert.equal(freshRes.headers['ratelimit-remaining'], '1');
+      // Trigger cleanup and verify it returns the number of evicted entries
+      const removedCount = cleanupExpiredRecords();
+      assert.ok(removedCount >= 1, `Expected at least 1 record removed, got: ${removedCount}`);
     });
   });
 
-  describe('Part 5: Demo Endpoints Full Policy & Header Verification', () => {
-    it('verifies /api/public enforces exactly 10 requests allowance', async () => {
-      const testIp = '10.0.0.7';
+  describe('Demo Endpoints Verification', () => {
+    it('enforces route-specific policy of 10 requests on /api/public', async () => {
+      const app = createTestApp();
+      app.use('/api', demoRoutes);
+
+      const testIp = '10.99.0.6';
 
       for (let i = 1; i <= 10; i++) {
-        const res = await request(demoApp)
-          .get('/api/public')
-          .set('X-Forwarded-For', testIp);
+        const res = await request(app).get('/api/public').set('X-Forwarded-For', testIp);
         assert.equal(res.status, 200);
         assert.equal(res.headers['ratelimit-remaining'], String(10 - i));
       }
 
-      // 11th request must be blocked
-      const blocked = await request(demoApp)
-        .get('/api/public')
-        .set('X-Forwarded-For', testIp);
-
+      const blocked = await request(app).get('/api/public').set('X-Forwarded-For', testIp);
       assert.equal(blocked.status, 429);
       assert.equal(blocked.headers['ratelimit-remaining'], '0');
       assert.ok(Number(blocked.headers['retry-after']) > 0);
