@@ -3,13 +3,24 @@ let cleanupInterval = null;
 
 const DEFAULT_CLEANUP_INTERVAL_MS = 60_000;
 
+/**
+ * Scans the in-memory Map and deletes records whose Fixed Windows have elapsed.
+ * Returns the number of evicted records so callers/tests can verify cleanup.
+ *
+ * @returns {number} Count of removed stale records
+ */
 export function cleanupExpiredRecords() {
   const now = Date.now();
+  let removed = 0;
+
   for (const [key, record] of store.entries()) {
     if (now - record.windowStart >= record.windowMs) {
       store.delete(key);
+      removed++;
     }
   }
+
+  return removed;
 }
 
 function ensureCleanupTimer(intervalMs = DEFAULT_CLEANUP_INTERVAL_MS) {
@@ -69,8 +80,11 @@ export function rateLimiter(options = {}) {
   return function rateLimiterMiddleware(req, res, next) {
     const now = Date.now();
     const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+    const method = (req.method || 'GET').toUpperCase();
     const routeKey = getRouteIdentifier(req);
-    const key = `${clientIp}:${routeKey}`;
+
+    // Key includes HTTP method so GET /users and POST /users maintain separate buckets
+    const key = `${clientIp}:${method}:${routeKey}`;
 
     const record = store.get(key);
 
