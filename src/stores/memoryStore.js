@@ -24,9 +24,9 @@ export class MemoryStore {
    * @param {string} params.key - Unique rate-limit key (e.g. smartrate:POST:/api/login:127.0.0.1)
    * @param {number} params.limit - Maximum allowed requests in the window
    * @param {number} params.windowMs - Window duration in milliseconds
-   * @returns {Promise<{ allowed: boolean, count: number, remaining: number, reset: number, retryAfter?: number }>}
+   * @returns {{ allowed: boolean, count: number, remaining: number, reset: number, retryAfter?: number }}
    */
-  async consume({ key, limit, windowMs }) {
+  consume({ key, limit, windowMs }) {
     const now = Date.now();
     const record = this.store.get(key);
 

@@ -1,8 +1,9 @@
 /**
  * SmartRate — Public Package Entry Point
  *
- * This file serves as the public facade for the SmartRate library.
- * Consumers import from this entry point rather than accessing internal files.
+ * Facade pattern: Exposes consumer-facing APIs (middleware, stores, keyBuilder).
  */
-export { default } from './limiter/rateLimiter.js';
-export { rateLimiter } from './limiter/rateLimiter.js';
+export { default, rateLimiter } from './limiter/rateLimiter.js';
+export { MemoryStore } from './stores/memoryStore.js';
+export { RedisStore } from './stores/redisStore.js';
+export { buildRateLimitKey } from './utils/keyBuilder.js';

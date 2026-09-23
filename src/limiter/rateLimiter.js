@@ -1,38 +1,17 @@
-const store = new Map();
-let cleanupInterval = null;
+import { MemoryStore } from '../stores/memoryStore.js';
+import { buildRateLimitKey } from '../utils/keyBuilder.js';
 
-const DEFAULT_CLEANUP_INTERVAL_MS = 60_000;
+// Default shared in-memory store for backwards compatibility when no custom store is provided
+const defaultMemoryStore = new MemoryStore();
 
 /**
- * Scans the in-memory Map and deletes records whose Fixed Windows have elapsed.
- * Returns the number of evicted records so callers/tests can verify cleanup.
+ * Scans the default in-memory store and evicts expired records.
+ * Exported for backwards-compatibility with v1 inspection tests.
  *
  * @returns {number} Count of removed stale records
  */
 export function cleanupExpiredRecords() {
-  const now = Date.now();
-  let removed = 0;
-
-  for (const [key, record] of store.entries()) {
-    if (now - record.windowStart >= record.windowMs) {
-      store.delete(key);
-      removed++;
-    }
-  }
-
-  return removed;
-}
-
-function ensureCleanupTimer(intervalMs = DEFAULT_CLEANUP_INTERVAL_MS) {
-  if (!cleanupInterval) {
-    cleanupInterval = setInterval(cleanupExpiredRecords, intervalMs);
-
-    // unref() ensures this background timer does not hold the Node.js event loop open
-    // during graceful shutdowns or test runs
-    if (typeof cleanupInterval.unref === 'function') {
-      cleanupInterval.unref();
-    }
-  }
+  return defaultMemoryStore.cleanupExpiredRecords();
 }
 
 function validateOptions(options) {
@@ -40,7 +19,7 @@ function validateOptions(options) {
     throw new TypeError('SmartRate: Options must be an object.');
   }
 
-  const { limit, windowMs } = options;
+  const { limit, windowMs, store } = options;
 
   if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
     throw new RangeError(`SmartRate: 'limit' must be a positive integer (received: ${limit}).`);
@@ -48,6 +27,10 @@ function validateOptions(options) {
 
   if (typeof windowMs !== 'number' || !Number.isFinite(windowMs) || windowMs <= 0) {
     throw new RangeError(`SmartRate: 'windowMs' must be a positive number in milliseconds (received: ${windowMs}).`);
+  }
+
+  if (store !== undefined && (!store || typeof store.consume !== 'function')) {
+    throw new TypeError("SmartRate: 'store' must be an object implementing a consume() method.");
   }
 }
 
@@ -71,54 +54,51 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
   }
 }
 
+/**
+ * SmartRate rate limiter middleware factory.
+ *
+ * @param {Object} options
+ * @param {number} options.limit - Max requests allowed in the window
+ * @param {number} options.windowMs - Window duration in milliseconds
+ * @param {Object} [options.store] - Store implementation (defaults to MemoryStore)
+ * @returns {import('express').RequestHandler}
+ */
 export function rateLimiter(options = {}) {
   validateOptions(options);
 
   const { limit, windowMs } = options;
-  ensureCleanupTimer();
+
+  // Store lifecycle: Selected/instantiated at factory configuration time, NOT per-request
+  const store = options.store || defaultMemoryStore;
 
   return function rateLimiterMiddleware(req, res, next) {
-    const now = Date.now();
     const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
     const method = (req.method || 'GET').toUpperCase();
     const routeKey = getRouteIdentifier(req);
 
-    // Key includes HTTP method so GET /users and POST /users maintain separate buckets
-    const key = `${clientIp}:${method}:${routeKey}`;
+    const key = buildRateLimitKey({
+      method,
+      route: routeKey,
+      clientIdentifier: clientIp
+    });
 
-    const record = store.get(key);
+    const result = store.consume({ key, limit, windowMs });
 
-    if (!record) {
-      store.set(key, { count: 1, windowStart: now, windowMs });
-      setRateLimitHeaders(res, { limit, remaining: limit - 1, reset: Math.ceil(windowMs / 1000) });
+    setRateLimitHeaders(res, {
+      limit,
+      remaining: result.remaining,
+      reset: result.reset,
+      retryAfter: result.retryAfter
+    });
+
+    if (result.allowed) {
       return next();
     }
-
-    const elapsedTime = now - record.windowStart;
-
-    if (elapsedTime >= windowMs) {
-      record.count = 1;
-      record.windowStart = now;
-      record.windowMs = windowMs;
-
-      setRateLimitHeaders(res, { limit, remaining: limit - 1, reset: Math.ceil(windowMs / 1000) });
-      return next();
-    }
-
-    if (record.count < limit) {
-      record.count += 1;
-      const reset = Math.ceil((record.windowStart + windowMs - now) / 1000);
-      setRateLimitHeaders(res, { limit, remaining: limit - record.count, reset });
-      return next();
-    }
-
-    const reset = Math.max(1, Math.ceil((record.windowStart + windowMs - now) / 1000));
-    setRateLimitHeaders(res, { limit, remaining: 0, reset, retryAfter: reset });
 
     return res.status(429).json({
       success: false,
       message: 'Too many requests',
-      retryAfter: reset
+      retryAfter: result.retryAfter
     });
   };
 }
