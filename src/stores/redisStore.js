@@ -1,8 +1,17 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const SCRIPT_PATH = path.join(__dirname, '../scripts/fixedWindow.lua');
+const FIXED_WINDOW_LUA = fs.readFileSync(SCRIPT_PATH, 'utf-8');
+
 /**
  * SmartRate — RedisStore
  *
  * Distributed Fixed Window rate-limiting store backed by Redis.
- * Injects a pre-connected Redis client from the host application.
+ * Executes state transitions atomically via an embedded Lua script.
  */
 export class RedisStore {
   /**
@@ -21,41 +30,48 @@ export class RedisStore {
       );
     }
 
-    if (typeof options.client.sendCommand !== 'function' && typeof options.client.incr !== 'function') {
+    if (typeof options.client.eval !== 'function' && typeof options.client.sendCommand !== 'function') {
       throw new TypeError('SmartRate: Injected Redis client does not appear to be a valid Redis client instance.');
     }
 
     this.client = options.client;
+    this.script = FIXED_WINDOW_LUA;
   }
 
   /**
-   * Consumes a request against the Fixed Window quota in Redis.
+   * Executes the atomic Fixed Window Lua script in Redis.
    *
-   * NOTE: This Day 2 multi-command implementation (INCR -> PEXPIRE -> PTTL) is
-   * an intentionally non-atomic intermediate baseline. It illustrates multi-step
-   * Redis operations and exposes the failure window / command interleaving
-   * that will be solved atomically with Lua in Day 3.
+   * @param {string} key - Rate-limit key
+   * @param {number} windowMs - Window duration in milliseconds
+   * @returns {Promise<[number, number]>} [count, remainingTtlMs]
+   * @private
+   */
+  async _evalScript(key, windowMs) {
+    if (typeof this.client.eval === 'function') {
+      return this.client.eval(this.script, {
+        keys: [key],
+        arguments: [String(windowMs)]
+      });
+    }
+
+    return this.client.sendCommand(['EVAL', this.script, '1', key, String(windowMs)]);
+  }
+
+  /**
+   * Consumes a request against the Fixed Window quota in Redis atomically via Lua.
    *
    * @param {Object} params
-   * @param {string} params.key
-   * @param {number} params.limit
-   * @param {number} params.windowMs
+   * @param {string} params.key - Unique rate-limit key
+   * @param {number} params.limit - Maximum allowed requests in window
+   * @param {number} params.windowMs - Window duration in milliseconds
    * @returns {Promise<{ allowed: boolean, count: number, remaining: number, reset: number, retryAfter?: number }>}
    */
   async consume({ key, limit, windowMs }) {
-    const count = await this.client.incr(key);
+    const rawResult = await this._evalScript(key, windowMs);
+    const [count, ttlMs] = Array.isArray(rawResult) ? rawResult : [1, windowMs];
 
-    if (count === 1) {
-      await this.client.pExpire(key, windowMs);
-    }
-
-    let ttlMs = await this.client.pTTL(key);
-
-    if (ttlMs < 0) {
-      ttlMs = windowMs;
-    }
-
-    const resetSeconds = Math.max(1, Math.ceil(ttlMs / 1000));
+    const ttl = Number(ttlMs);
+    const resetSeconds = Math.max(1, Math.ceil((ttl > 0 ? ttl : windowMs) / 1000));
     const allowed = count <= limit;
     const remaining = Math.max(0, limit - count);
 

@@ -13,40 +13,29 @@ function createSimulatedRedisClient() {
   const data = new Map();
 
   return {
-    async incr(key) {
-      const entry = data.get(key);
+    async eval(script, options) {
+      const key = options.keys[0];
+      const windowMs = Number(options.arguments[0]);
       const now = Date.now();
+      let entry = data.get(key);
 
       if (!entry || (entry.expiresAt && now >= entry.expiresAt)) {
-        data.set(key, { value: 1, expiresAt: null });
-        return 1;
+        entry = { value: 1, expiresAt: now + windowMs };
+        data.set(key, entry);
+        return [1, windowMs];
       }
 
       entry.value += 1;
-      return entry.value;
+      const remainingTtl = Math.max(0, entry.expiresAt - now);
+      return [entry.value, remainingTtl];
     },
 
-    async pExpire(key, ms) {
-      const entry = data.get(key);
-      if (!entry) return false;
-      entry.expiresAt = Date.now() + ms;
-      return true;
-    },
-
-    async pTTL(key) {
-      const entry = data.get(key);
-      if (!entry) return -2;
-      if (!entry.expiresAt) return -1;
-
-      const remaining = entry.expiresAt - Date.now();
-      if (remaining <= 0) {
-        data.delete(key);
-        return -2;
+    async sendCommand(args) {
+      if (args[0] === 'EVAL') {
+        const key = args[3];
+        const windowMs = Number(args[4]);
+        return this.eval(null, { keys: [key], arguments: [String(windowMs)] });
       }
-      return remaining;
-    },
-
-    async sendCommand() {
       return 'OK';
     }
   };
