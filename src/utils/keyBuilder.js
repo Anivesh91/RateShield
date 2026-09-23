@@ -1,16 +1,7 @@
 /**
- * SmartRate — Key Builder
- *
- * Generates predictable, namespaced rate-limiting keys.
- * Format: {prefix}:{method}:{normalizedRoute}:{clientIdentifier}
- * Example: smartrate:POST:/api/login:192.168.1.5
- *
- * Query parameters are explicitly stripped so that requests like:
- *   GET /api/products?page=1
- *   GET /api/products?page=2
- * share the same rate-limiting bucket.
+ * Generates namespaced rate-limit keys: {prefix}:{method}:{normalizedRoute}:{clientIdentifier}
+ * Strips query parameters so requests map to the same route quota.
  */
-
 export function buildRateLimitKey({
   prefix = 'smartrate',
   method = 'GET',

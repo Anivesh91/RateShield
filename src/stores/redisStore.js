@@ -1,15 +1,8 @@
 /**
- * SmartRate — RedisStore Foundation
+ * SmartRate — RedisStore
  *
- * Distributed rate-limiting store backed by Redis.
- * Follows Dependency Injection: Receives a pre-configured and connected Redis client
- * from the consumer application.
- *
- * Responsibilities:
- * - Validates injected Redis client instance
- * - Performs Redis rate-limiting state operations (implemented in Day 2 & Day 3)
- * - Zero Express HTTP knowledge (no req/res/headers)
- * - Zero connection ownership (lifecycle owned by application)
+ * Distributed Fixed Window rate-limiting store backed by Redis.
+ * Injects a pre-connected Redis client from the host application.
  */
 export class RedisStore {
   /**
@@ -38,12 +31,6 @@ export class RedisStore {
 
   /**
    * Consumes a request against the Fixed Window quota in Redis.
-   * Note: Multi-command implementation added in Day 2, atomic Lua in Day 3.
-   *
-   * @param {Object} params
-   * @param {string} params.key
-   * @param {number} params.limit
-   * @param {number} params.windowMs
    */
   async consume({ key, limit, windowMs }) {
     throw new Error('SmartRate: RedisStore.consume() will be activated in Day 2.');

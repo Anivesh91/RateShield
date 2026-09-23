@@ -30,7 +30,6 @@ export class MemoryStore {
     const now = Date.now();
     const record = this.store.get(key);
 
-    // Scenario 1: First request in window
     if (!record) {
       this.store.set(key, { count: 1, windowStart: now, windowMs });
       return {
@@ -43,7 +42,6 @@ export class MemoryStore {
 
     const elapsedTime = now - record.windowStart;
 
-    // Scenario 2: Previous window elapsed -> Reset window with fresh count
     if (elapsedTime >= windowMs) {
       record.count = 1;
       record.windowStart = now;
@@ -57,7 +55,6 @@ export class MemoryStore {
       };
     }
 
-    // Scenario 3: Within active window and within quota -> Increment count
     if (record.count < limit) {
       record.count += 1;
       const reset = Math.max(1, Math.ceil((record.windowStart + windowMs - now) / 1000));
@@ -70,7 +67,6 @@ export class MemoryStore {
       };
     }
 
-    // Scenario 4: Quota exhausted -> Block request
     const reset = Math.max(1, Math.ceil((record.windowStart + windowMs - now) / 1000));
 
     return {

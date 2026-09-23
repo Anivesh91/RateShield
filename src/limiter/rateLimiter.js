@@ -1,14 +1,13 @@
 import { MemoryStore } from '../stores/memoryStore.js';
 import { buildRateLimitKey } from '../utils/keyBuilder.js';
 
-// Default shared in-memory store for backwards compatibility when no custom store is provided
 const defaultMemoryStore = new MemoryStore();
 
 /**
  * Scans the default in-memory store and evicts expired records.
- * Exported for backwards-compatibility with v1 inspection tests.
+ * Exported for backwards compatibility with test assertions.
  *
- * @returns {number} Count of removed stale records
+ * @returns {number}
  */
 export function cleanupExpiredRecords() {
   return defaultMemoryStore.cleanupExpiredRecords();
@@ -35,7 +34,6 @@ function validateOptions(options) {
 }
 
 function getRouteIdentifier(req) {
-  // Strip query parameters so /endpoint?page=1 and ?page=2 share the same quota bucket
   if (req.originalUrl) {
     return req.originalUrl.split('?')[0];
   }
@@ -67,8 +65,6 @@ export function rateLimiter(options = {}) {
   validateOptions(options);
 
   const { limit, windowMs } = options;
-
-  // Store lifecycle: Selected/instantiated at factory configuration time, NOT per-request
   const store = options.store || defaultMemoryStore;
 
   return function rateLimiterMiddleware(req, res, next) {

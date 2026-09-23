@@ -28,7 +28,6 @@ describe('SmartRate — MemoryStore Unit Tests', () => {
       assert.equal(result.remaining, 3 - i);
     }
 
-    // 4th request must be blocked
     const blocked = await store.consume({ key, limit: 3, windowMs: 60_000 });
     assert.equal(blocked.allowed, false);
     assert.equal(blocked.remaining, 0);
@@ -41,18 +40,14 @@ describe('SmartRate — MemoryStore Unit Tests', () => {
     const store = new MemoryStore();
     const key = 'test:key:3';
 
-    // 1st request (windowMs: 50ms)
     const res1 = await store.consume({ key, limit: 1, windowMs: 50 });
     assert.equal(res1.allowed, true);
 
-    // 2nd request immediately blocked
     const res2 = await store.consume({ key, limit: 1, windowMs: 50 });
     assert.equal(res2.allowed, false);
 
-    // Wait for window to elapse
     await new Promise((resolve) => setTimeout(resolve, 60));
 
-    // 3rd request after expiry must succeed with fresh window
     const res3 = await store.consume({ key, limit: 1, windowMs: 50 });
     assert.equal(res3.allowed, true);
     assert.equal(res3.count, 1);
@@ -64,12 +59,10 @@ describe('SmartRate — MemoryStore Unit Tests', () => {
   it('cleans up expired records and returns count of evicted entries', async () => {
     const store = new MemoryStore();
 
-    // Populate active and short-lived entries
     await store.consume({ key: 'stale:1', limit: 5, windowMs: 30 });
     await store.consume({ key: 'stale:2', limit: 5, windowMs: 30 });
     await store.consume({ key: 'active:1', limit: 5, windowMs: 60_000 });
 
-    // Wait 40ms for short-lived entries to expire
     await new Promise((resolve) => setTimeout(resolve, 40));
 
     const removed = store.cleanupExpiredRecords();
@@ -88,7 +81,6 @@ describe('SmartRate — MemoryStore Unit Tests', () => {
     const blockedA = await store.consume({ key: 'client:A', limit: 1, windowMs: 60_000 });
     assert.equal(blockedA.allowed, false);
 
-    // client:B should be unaffected
     const allowedB = await store.consume({ key: 'client:B', limit: 1, windowMs: 60_000 });
     assert.equal(allowedB.allowed, true);
     assert.equal(allowedB.count, 1);

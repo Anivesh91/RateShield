@@ -50,7 +50,6 @@ describe('SmartRate v1 — Test Suite', () => {
 
       const testIp = '192.168.1.50';
 
-      // Requests 1 through 5 must all succeed (200 OK)
       for (let i = 1; i <= 5; i++) {
         const response = await request(app)
           .get('/test-boundary')
@@ -63,7 +62,6 @@ describe('SmartRate v1 — Test Suite', () => {
         assert.ok(Number(response.headers['ratelimit-reset']) > 0);
       }
 
-      // Request 6 (N+1) must return HTTP 429 Too Many Requests
       const blockedResponse = await request(app)
         .get('/test-boundary')
         .set('X-Forwarded-For', testIp);
@@ -73,7 +71,6 @@ describe('SmartRate v1 — Test Suite', () => {
       assert.equal(blockedResponse.body.message, 'Too many requests');
       assert.ok(Number(blockedResponse.body.retryAfter) > 0);
 
-      // Verify blocked response headers
       assert.equal(blockedResponse.headers['ratelimit-limit'], '5');
       assert.equal(blockedResponse.headers['ratelimit-remaining'], '0');
       assert.ok(Number(blockedResponse.headers['retry-after']) > 0);
@@ -89,12 +86,10 @@ describe('SmartRate v1 — Test Suite', () => {
 
       const testIp = '192.168.1.51';
 
-      // Request 1: Allowed (Remaining = 0)
       const res1 = await request(app).get('/test-negative-guard').set('X-Forwarded-For', testIp);
       assert.equal(res1.status, 200);
       assert.equal(res1.headers['ratelimit-remaining'], '0');
 
-      // Subsequent blocked requests must stay at '0', never '-1'
       const res2 = await request(app).get('/test-negative-guard').set('X-Forwarded-For', testIp);
       assert.equal(res2.status, 429);
       assert.equal(res2.headers['ratelimit-remaining'], '0');
@@ -117,13 +112,11 @@ describe('SmartRate v1 — Test Suite', () => {
       const ipA = '172.16.10.1';
       const ipB = '172.16.10.2';
 
-      // IP A uses full quota
       await request(app).get('/api/shared-endpoint').set('X-Forwarded-For', ipA);
       await request(app).get('/api/shared-endpoint').set('X-Forwarded-For', ipA);
       const ipABlocked = await request(app).get('/api/shared-endpoint').set('X-Forwarded-For', ipA);
       assert.equal(ipABlocked.status, 429);
 
-      // IP B accesses the same route and must be allowed with fresh quota!
       const ipBResponse = await request(app).get('/api/shared-endpoint').set('X-Forwarded-For', ipB);
       assert.equal(ipBResponse.status, 200);
       assert.equal(ipBResponse.headers['ratelimit-remaining'], '1');
@@ -138,26 +131,22 @@ describe('SmartRate v1 — Test Suite', () => {
 
       const clientIp = '10.99.0.1';
 
-      // 1. Exhaust GET /api/users quota (2 requests)
       await request(app).get('/api/users').set('X-Forwarded-For', clientIp);
       await request(app).get('/api/users').set('X-Forwarded-For', clientIp);
       const getBlocked = await request(app).get('/api/users').set('X-Forwarded-For', clientIp);
       assert.equal(getBlocked.status, 429);
 
-      // 2. Immediately call POST /api/users with the SAME IP -> must succeed!
       const postResponse = await request(app).post('/api/users').set('X-Forwarded-For', clientIp);
       assert.equal(postResponse.status, 200);
       assert.equal(postResponse.headers['ratelimit-remaining'], '1');
     });
 
     it('isolates counters between different route paths for the same client IP', async () => {
-      // Create a test app with trust proxy using the demo router logic
       const app = createTestApp();
       app.use('/api', demoRoutes);
 
       const testIp = '10.99.0.2';
 
-      // Exhaust /api/login quota (limit: 3)
       for (let i = 0; i < 3; i++) {
         const res = await request(app).post('/api/login').set('X-Forwarded-For', testIp);
         assert.equal(res.status, 200);
@@ -165,7 +154,6 @@ describe('SmartRate v1 — Test Suite', () => {
       const loginBlocked = await request(app).post('/api/login').set('X-Forwarded-For', testIp);
       assert.equal(loginBlocked.status, 429);
 
-      // /api/test (limit: 5) for the same IP must remain unaffected!
       const testRes = await request(app).get('/api/test').set('X-Forwarded-For', testIp);
       assert.equal(testRes.status, 200);
       assert.equal(testRes.headers['ratelimit-remaining'], '4');
@@ -224,13 +212,9 @@ describe('SmartRate v1 — Test Suite', () => {
 
       const testIp = '10.99.0.5';
 
-      // Insert record
       await request(app).get('/test-cleanup').set('X-Forwarded-For', testIp);
-
-      // Wait 60ms for window to elapse
       await new Promise((resolve) => setTimeout(resolve, 60));
 
-      // Trigger cleanup and verify it returns the number of evicted entries
       const removedCount = cleanupExpiredRecords();
       assert.ok(removedCount >= 1, `Expected at least 1 record removed, got: ${removedCount}`);
     });
