@@ -67,35 +67,39 @@ export function rateLimiter(options = {}) {
   const { limit, windowMs } = options;
   const store = options.store || defaultMemoryStore;
 
-  return function rateLimiterMiddleware(req, res, next) {
-    const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
-    const method = (req.method || 'GET').toUpperCase();
-    const routeKey = getRouteIdentifier(req);
+  return async function rateLimiterMiddleware(req, res, next) {
+    try {
+      const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+      const method = (req.method || 'GET').toUpperCase();
+      const routeKey = getRouteIdentifier(req);
 
-    const key = buildRateLimitKey({
-      method,
-      route: routeKey,
-      clientIdentifier: clientIp
-    });
+      const key = buildRateLimitKey({
+        method,
+        route: routeKey,
+        clientIdentifier: clientIp
+      });
 
-    const result = store.consume({ key, limit, windowMs });
+      const result = await store.consume({ key, limit, windowMs });
 
-    setRateLimitHeaders(res, {
-      limit,
-      remaining: result.remaining,
-      reset: result.reset,
-      retryAfter: result.retryAfter
-    });
+      setRateLimitHeaders(res, {
+        limit,
+        remaining: result.remaining,
+        reset: result.reset,
+        retryAfter: result.retryAfter
+      });
 
-    if (result.allowed) {
-      return next();
+      if (result.allowed) {
+        return next();
+      }
+
+      return res.status(429).json({
+        success: false,
+        message: 'Too many requests',
+        retryAfter: result.retryAfter
+      });
+    } catch (err) {
+      return next(err);
     }
-
-    return res.status(429).json({
-      success: false,
-      message: 'Too many requests',
-      retryAfter: result.retryAfter
-    });
   };
 }
 

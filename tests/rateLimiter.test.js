@@ -239,4 +239,49 @@ describe('SmartRate v1 — Test Suite', () => {
       assert.ok(Number(blocked.headers['retry-after']) > 0);
     });
   });
+
+  describe('Asynchronous Store Support & Error Handling', () => {
+    it('supports custom asynchronous stores returning promises', async () => {
+      const app = createTestApp();
+      const mockAsyncStore = {
+        async consume({ limit }) {
+          return { allowed: true, count: 1, remaining: limit - 1, reset: 60 };
+        }
+      };
+
+      app.get(
+        '/test-async-store',
+        rateLimiter({ limit: 5, windowMs: 60_000, store: mockAsyncStore }),
+        (req, res) => res.json({ success: true })
+      );
+
+      const res = await request(app).get('/test-async-store');
+      assert.equal(res.status, 200);
+      assert.equal(res.headers['ratelimit-remaining'], '4');
+    });
+
+    it('forwards store errors to Express next(err) without unhandled promise rejections', async () => {
+      const app = createTestApp();
+      const failingStore = {
+        async consume() {
+          throw new Error('Redis connection lost');
+        }
+      };
+
+      app.get(
+        '/test-async-error',
+        rateLimiter({ limit: 5, windowMs: 60_000, store: failingStore }),
+        (req, res) => res.json({ success: true })
+      );
+
+      // Express error handling middleware
+      app.use((err, req, res, next) => {
+        res.status(500).json({ error: err.message });
+      });
+
+      const res = await request(app).get('/test-async-error');
+      assert.equal(res.status, 500);
+      assert.equal(res.body.error, 'Redis connection lost');
+    });
+  });
 });
