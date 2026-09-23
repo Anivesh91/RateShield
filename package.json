@@ -1,13 +1,14 @@
 {
   "name": "smart-rate",
-  "version": "1.0.0",
-  "description": "Reusable in-memory Fixed Window rate limiting middleware for Express.js",
+  "version": "2.0.0",
+  "description": "Production-ready in-memory and Redis-backed Fixed Window rate limiting middleware for Express.js",
   "type": "module",
   "main": "./src/index.js",
   "exports": "./src/index.js",
   "scripts": {
     "dev": "node --watch examples/express-demo/server.js",
     "start": "node examples/express-demo/server.js",
+    "demo:multi": "node examples/express-demo/multi-instance.js",
     "test": "node --test"
   },
   "keywords": [
@@ -16,6 +17,9 @@
     "middleware",
     "fixed-window",
     "in-memory",
+    "redis",
+    "distributed",
+    "lua",
     "smart-rate"
   ],
   "author": "",
