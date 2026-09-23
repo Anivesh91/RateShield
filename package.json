@@ -27,5 +27,8 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "supertest": "^7.0.0"
+  },
+  "dependencies": {
+    "redis": "^6.2.1"
   }
 }
