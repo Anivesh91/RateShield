@@ -67,11 +67,29 @@ export class RedisStore {
    * @returns {Promise<{ allowed: boolean, count: number, remaining: number, reset: number, retryAfter?: number }>}
    */
   async consume({ key, limit, windowMs }) {
-    const rawResult = await this._evalScript(key, windowMs);
-    const [count, ttlMs] = Array.isArray(rawResult) ? rawResult : [1, windowMs];
+    if (typeof key !== 'string' || key.trim().length === 0) {
+      throw new TypeError("SmartRate: RedisStore 'key' must be a non-empty string.");
+    }
 
-    const ttl = Number(ttlMs);
-    const resetSeconds = Math.max(1, Math.ceil((ttl > 0 ? ttl : windowMs) / 1000));
+    if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
+      throw new RangeError(`SmartRate: RedisStore 'limit' must be a positive integer (received: ${limit}).`);
+    }
+
+    if (typeof windowMs !== 'number' || !Number.isFinite(windowMs) || windowMs <= 0) {
+      throw new RangeError(`SmartRate: RedisStore 'windowMs' must be a positive number in milliseconds (received: ${windowMs}).`);
+    }
+
+    const rawResult = await this._evalScript(key, windowMs);
+    const [rawCount, rawTtlMs] = Array.isArray(rawResult) ? rawResult : [1, windowMs];
+
+    const count = Number(rawCount);
+    const ttlMs = Number(rawTtlMs);
+
+    if (ttlMs === -1) {
+      throw new Error(`SmartRate: Key '${key}' exists in Redis without an expiration TTL.`);
+    }
+
+    const resetSeconds = Math.max(1, Math.ceil((ttlMs > 0 ? ttlMs : windowMs) / 1000));
     const allowed = count <= limit;
     const remaining = Math.max(0, limit - count);
 

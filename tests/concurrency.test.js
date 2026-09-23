@@ -7,8 +7,10 @@ import { RedisStore } from '../src/stores/redisStore.js';
 
 /**
  * Simulates Redis's atomic Lua script execution guarantee:
- * "Redis executes a Lua script atomically with respect to other Redis commands.
- * Other commands do not interleave with the script while it is executing."
+ * Redis executes a Lua script atomically with respect to other Redis commands.
+ * Commands from other clients cannot interleave with the script while it is executing.
+ * (Note: Node.js handles incoming HTTP requests concurrently; Redis guarantees atomic
+ * execution of each Lua script without command interleaving).
  */
 function createAtomicRedisClient() {
   const store = new Map();
@@ -35,6 +37,10 @@ function createAtomicRedisClient() {
           resolve([entry.count, remainingTtl]);
         });
       });
+    },
+
+    getCounter(key) {
+      return store.get(key)?.count || 0;
     },
 
     async sendCommand() {
@@ -91,6 +97,12 @@ describe('SmartRate v2 — Concurrency & Atomicity Verification', () => {
       assert.equal(res.headers['ratelimit-remaining'], '0');
       assert.ok(Number(res.headers['retry-after']) > 0);
     }
+
+    assert.equal(
+      redisClient.getCounter('smartrate:GET:/api/burst-test:10.200.0.1'),
+      TOTAL_REQUESTS,
+      `Expected final Redis counter to be ${TOTAL_REQUESTS}`
+    );
   });
 
   it('enforces independent concurrent quotas for distinct client IPs in parallel', async () => {

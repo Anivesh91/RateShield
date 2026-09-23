@@ -107,5 +107,39 @@ describe('SmartRate — RedisStore Unit Tests', () => {
       assert.equal(result.reset, 35);
       assert.equal(result.retryAfter, 35);
     });
+
+    it('validates consume input arguments fail-fast', async () => {
+      const store = new RedisStore({ client: { eval: async () => [1, 60000] } });
+
+      await assert.rejects(() => store.consume({ key: '', limit: 5, windowMs: 60000 }), {
+        name: 'TypeError',
+        message: /'key' must be a non-empty string/
+      });
+
+      await assert.rejects(() => store.consume({ key: 'k', limit: 0, windowMs: 60000 }), {
+        name: 'RangeError',
+        message: /'limit' must be a positive integer/
+      });
+
+      await assert.rejects(() => store.consume({ key: 'k', limit: 5, windowMs: -1 }), {
+        name: 'RangeError',
+        message: /'windowMs' must be a positive number/
+      });
+    });
+
+    it('throws descriptive Error when Redis returns TTL = -1 (key without expiry)', async () => {
+      const mockClient = {
+        eval: async () => [5, -1]
+      };
+
+      const store = new RedisStore({ client: mockClient });
+      await assert.rejects(
+        () => store.consume({ key: 'test:orphan', limit: 5, windowMs: 60_000 }),
+        {
+          name: 'Error',
+          message: /Key 'test:orphan' exists in Redis without an expiration TTL/
+        }
+      );
+    });
   });
 });
