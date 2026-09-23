@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "node --watch examples/express-demo/server.js",
     "start": "node examples/express-demo/server.js",
-    "test": "node --test tests/rateLimiter.test.js"
+    "test": "node --test"
   },
   "keywords": [
     "rate-limiter",
