@@ -35,18 +35,40 @@ function validateOptions(options) {
   }
 
   if (algorithm === 'token-bucket') {
-    const effectiveCapacity = capacity ?? limit;
-    if (typeof effectiveCapacity !== 'number' || !Number.isInteger(effectiveCapacity) || effectiveCapacity <= 0) {
+    const hasCapacity = capacity !== undefined || limit !== undefined;
+    if (!hasCapacity) {
       throw new RangeError(
-        `SmartRate: Token Bucket requires a positive integer 'capacity' (or 'limit') (received: ${effectiveCapacity}).`
+        "SmartRate: Token Bucket requires a positive integer 'capacity' (or 'limit') (received: undefined)."
       );
     }
 
-    const effectiveRefillRate = refillRate ?? (limit && windowMs ? limit / (windowMs / 1000) : undefined);
-    if (typeof effectiveRefillRate !== 'number' || !Number.isFinite(effectiveRefillRate) || effectiveRefillRate <= 0) {
+    if (capacity !== undefined) {
+      if (typeof capacity !== 'function' && (typeof capacity !== 'number' || !Number.isInteger(capacity) || capacity <= 0)) {
+        throw new RangeError(
+          `SmartRate: Token Bucket requires a positive integer 'capacity' (or 'limit') (received: ${capacity}).`
+        );
+      }
+    } else if (limit !== undefined) {
+      if (typeof limit !== 'function' && (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0)) {
+        throw new RangeError(
+          `SmartRate: Token Bucket requires a positive integer 'capacity' (or 'limit') (received: ${limit}).`
+        );
+      }
+    }
+
+    const hasRefill = refillRate !== undefined || (limit !== undefined && windowMs !== undefined);
+    if (!hasRefill) {
       throw new RangeError(
-        `SmartRate: Token Bucket requires a positive number 'refillRate' (or 'limit' and 'windowMs') (received: ${effectiveRefillRate}).`
+        "SmartRate: Token Bucket requires a positive number 'refillRate' (or 'limit' and 'windowMs') (received: undefined)."
       );
+    }
+
+    if (refillRate !== undefined) {
+      if (typeof refillRate !== 'function' && (typeof refillRate !== 'number' || !Number.isFinite(refillRate) || refillRate <= 0)) {
+        throw new RangeError(
+          `SmartRate: Token Bucket requires a positive number 'refillRate' (or 'limit' and 'windowMs') (received: ${refillRate}).`
+        );
+      }
     }
 
     if (cost !== undefined) {
@@ -58,11 +80,11 @@ function validateOptions(options) {
       }
     }
   } else {
-    if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
+    if (typeof limit !== 'function' && (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0)) {
       throw new RangeError(`SmartRate: 'limit' must be a positive integer (received: ${limit}).`);
     }
 
-    if (typeof windowMs !== 'number' || !Number.isFinite(windowMs) || windowMs <= 0) {
+    if (typeof windowMs !== 'function' && (typeof windowMs !== 'number' || !Number.isFinite(windowMs) || windowMs <= 0)) {
       throw new RangeError(`SmartRate: 'windowMs' must be a positive number in milliseconds (received: ${windowMs}).`);
     }
   }
@@ -95,9 +117,13 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
  * SmartRate rate limiter middleware factory.
  *
  * @param {Object} options
- * @param {number} options.limit - Max requests allowed in the window
- * @param {number} options.windowMs - Window duration in milliseconds
- * @param {'fixed-window'|'sliding-window'} [options.algorithm='fixed-window'] - Rate limiting algorithm
+ * @param {number|Function} [options.limit] - Max requests allowed in the window (or dynamic policy function)
+ * @param {number|Function} [options.windowMs] - Window duration in milliseconds (or dynamic function)
+ * @param {'fixed-window'|'sliding-window'|'token-bucket'} [options.algorithm='fixed-window'] - Selected algorithm
+ * @param {number|Function} [options.capacity] - Token bucket capacity (or dynamic function)
+ * @param {number|Function} [options.refillRate] - Token bucket refill rate in tokens/sec (or dynamic function)
+ * @param {number|Function} [options.cost=1] - Request cost in tokens (or dynamic function)
+ * @param {Function} [options.keyGenerator] - Custom client identifier extractor
  * @param {Object} [options.store] - Store implementation (defaults to MemoryStore)
  * @returns {import('express').RequestHandler}
  */
@@ -108,9 +134,6 @@ export function rateLimiter(options = {}) {
   const algorithm = options.algorithm || 'fixed-window';
   const store = options.store || defaultMemoryStore;
   const keyGenerator = options.keyGenerator || defaultKeyGenerator;
-
-  const effectiveCapacity = capacity ?? limit;
-  const effectiveRefillRate = refillRate ?? (limit && windowMs ? limit / (windowMs / 1000) : undefined);
 
   return async function rateLimiterMiddleware(req, res, next) {
     try {
@@ -129,6 +152,25 @@ export function rateLimiter(options = {}) {
         clientIdentifier
       });
 
+      // 1. Resolve dynamic limit & windowMs
+      const resolvedLimit = typeof limit === 'function' ? await limit(req) : limit;
+      const resolvedWindowMs = typeof windowMs === 'function' ? await windowMs(req) : windowMs;
+
+      // 2. Resolve dynamic capacity & refillRate
+      const resolvedCapacity = typeof capacity === 'function'
+        ? await capacity(req)
+        : (capacity ?? resolvedLimit);
+
+      let resolvedRefillRate;
+      if (typeof refillRate === 'function') {
+        resolvedRefillRate = await refillRate(req);
+      } else if (refillRate !== undefined) {
+        resolvedRefillRate = refillRate;
+      } else if (resolvedLimit && resolvedWindowMs) {
+        resolvedRefillRate = resolvedLimit / (resolvedWindowMs / 1000);
+      }
+
+      // 3. Resolve dynamic request cost
       let requestCost = 1;
       if (typeof cost === 'function') {
         requestCost = await cost(req);
@@ -136,17 +178,37 @@ export function rateLimiter(options = {}) {
         requestCost = cost;
       }
 
+      // 4. Validate resolved dynamic values fail-fast
+      if (algorithm === 'token-bucket') {
+        if (typeof resolvedCapacity !== 'number' || !Number.isInteger(resolvedCapacity) || resolvedCapacity <= 0) {
+          throw new RangeError(`SmartRate: Dynamic 'capacity' must resolve to a positive integer (received: ${resolvedCapacity}).`);
+        }
+        if (typeof resolvedRefillRate !== 'number' || !Number.isFinite(resolvedRefillRate) || resolvedRefillRate <= 0) {
+          throw new RangeError(`SmartRate: Dynamic 'refillRate' must resolve to a positive number (received: ${resolvedRefillRate}).`);
+        }
+        if (typeof requestCost !== 'number' || !Number.isInteger(requestCost) || requestCost <= 0) {
+          throw new RangeError(`SmartRate: Dynamic 'cost' must resolve to a positive integer (received: ${requestCost}).`);
+        }
+      } else {
+        if (typeof resolvedLimit !== 'number' || !Number.isInteger(resolvedLimit) || resolvedLimit <= 0) {
+          throw new RangeError(`SmartRate: Dynamic 'limit' must resolve to a positive integer (received: ${resolvedLimit}).`);
+        }
+        if (typeof resolvedWindowMs !== 'number' || !Number.isFinite(resolvedWindowMs) || resolvedWindowMs <= 0) {
+          throw new RangeError(`SmartRate: Dynamic 'windowMs' must resolve to a positive number in milliseconds (received: ${resolvedWindowMs}).`);
+        }
+      }
+
       const result = await store.consume({
         key,
-        limit,
-        windowMs,
+        limit: resolvedLimit,
+        windowMs: resolvedWindowMs,
         algorithm,
-        capacity: effectiveCapacity,
-        refillRate: effectiveRefillRate,
+        capacity: resolvedCapacity,
+        refillRate: resolvedRefillRate,
         cost: requestCost
       });
 
-      const headerLimit = effectiveCapacity ?? limit;
+      const headerLimit = algorithm === 'token-bucket' ? resolvedCapacity : resolvedLimit;
 
       setRateLimitHeaders(res, {
         limit: headerLimit,
