@@ -45,7 +45,7 @@ export class MemoryStore {
   _consumeFixedWindow({ key, limit, windowMs, now }) {
     const record = this.store.get(key);
 
-    if (!record || !record.windowStart) {
+    if (!record || record.windowStart === undefined) {
       this.store.set(key, { count: 1, windowStart: now, windowMs });
       return {
         allowed: true,
@@ -152,10 +152,10 @@ export class MemoryStore {
    * For Fixed Window: deletes keys whose fixed bucket has elapsed.
    * Returns the count of removed stale records.
    *
+   * @param {number} [now=Date.now()]
    * @returns {number}
    */
-  cleanupExpiredRecords() {
-    const now = Date.now();
+  cleanupExpiredRecords(now = Date.now()) {
     let removed = 0;
 
     for (const [key, record] of this.store.entries()) {
