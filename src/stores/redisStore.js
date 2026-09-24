@@ -11,11 +11,14 @@ const FIXED_WINDOW_LUA = fs.readFileSync(FIXED_SCRIPT_PATH, 'utf-8');
 const SLIDING_SCRIPT_PATH = path.join(__dirname, '../scripts/slidingWindow.lua');
 const SLIDING_WINDOW_LUA = fs.readFileSync(SLIDING_SCRIPT_PATH, 'utf-8');
 
+const TOKEN_BUCKET_SCRIPT_PATH = path.join(__dirname, '../scripts/tokenBucket.lua');
+const TOKEN_BUCKET_LUA = fs.readFileSync(TOKEN_BUCKET_SCRIPT_PATH, 'utf-8');
+
 /**
  * SmartRate — RedisStore
  *
  * Distributed rate-limiting store backed by Redis.
- * Supports both Fixed Window and Rolling Sliding Window algorithms.
+ * Supports Fixed Window, Rolling Sliding Window, and Token Bucket algorithms.
  * Executes state transitions atomically via embedded Lua scripts.
  */
 export class RedisStore {
@@ -43,6 +46,7 @@ export class RedisStore {
     this.script = FIXED_WINDOW_LUA;
     this.fixedScript = FIXED_WINDOW_LUA;
     this.slidingScript = SLIDING_WINDOW_LUA;
+    this.tokenBucketScript = TOKEN_BUCKET_LUA;
   }
 
   /**
@@ -96,19 +100,82 @@ export class RedisStore {
   }
 
   /**
+   * Executes the atomic Token Bucket Lua script in Redis.
+   *
+   * @param {string} key - Rate-limit key
+   * @param {number} now - Timestamp in milliseconds
+   * @param {number} capacity - Maximum bucket capacity
+   * @param {number} refillRate - Refill rate in tokens per second
+   * @param {number} cost - Tokens to consume
+   * @returns {Promise<[number, number, number, number]>} [allowed (1 or 0), remaining, reset, retryAfter]
+   * @private
+   */
+  async _evalTokenBucketScript(key, now, capacity, refillRate, cost) {
+    if (typeof this.client.eval === 'function') {
+      return this.client.eval(this.tokenBucketScript, {
+        keys: [key],
+        arguments: [String(now), String(capacity), String(refillRate), String(cost)]
+      });
+    }
+
+    return this.client.sendCommand([
+      'EVAL',
+      this.tokenBucketScript,
+      '1',
+      key,
+      String(now),
+      String(capacity),
+      String(refillRate),
+      String(cost)
+    ]);
+  }
+
+  /**
    * Consumes a request against the rate-limit quota in Redis atomically via Lua.
    *
    * @param {Object} params
    * @param {string} params.key - Unique rate-limit key
-   * @param {number} params.limit - Maximum allowed requests in window
-   * @param {number} params.windowMs - Window duration in milliseconds
-   * @param {'fixed-window'|'sliding-window'} [params.algorithm='fixed-window'] - Selected algorithm
+   * @param {number} [params.limit] - Maximum allowed requests in window
+   * @param {number} [params.windowMs] - Window duration in milliseconds
+   * @param {'fixed-window'|'sliding-window'|'token-bucket'} [params.algorithm='fixed-window'] - Selected algorithm
+   * @param {number} [params.capacity] - Token bucket capacity
+   * @param {number} [params.refillRate] - Token bucket refill rate in tokens/sec
+   * @param {number} [params.cost=1] - Request cost in tokens
    * @param {number} [params.now=Date.now()] - Timestamp hook for deterministic testing
    * @returns {Promise<{ allowed: boolean, count: number, remaining: number, reset: number, retryAfter?: number }>}
    */
-  async consume({ key, limit, windowMs, algorithm = 'fixed-window', now = Date.now() }) {
+  async consume({
+    key,
+    limit,
+    windowMs,
+    algorithm = 'fixed-window',
+    capacity,
+    refillRate,
+    cost = 1,
+    now = Date.now()
+  }) {
     if (typeof key !== 'string' || key.trim().length === 0) {
       throw new TypeError("SmartRate: RedisStore 'key' must be a non-empty string.");
+    }
+
+    if (algorithm === 'token-bucket') {
+      const resolvedCapacity = capacity ?? limit;
+      if (typeof resolvedCapacity !== 'number' || !Number.isInteger(resolvedCapacity) || resolvedCapacity <= 0) {
+        throw new RangeError(`SmartRate: RedisStore 'capacity' must be a positive integer (received: ${resolvedCapacity}).`);
+      }
+
+      const resolvedRefillRate = refillRate ?? (limit && windowMs ? limit / (windowMs / 1000) : undefined);
+      if (typeof resolvedRefillRate !== 'number' || !Number.isFinite(resolvedRefillRate) || resolvedRefillRate <= 0) {
+        throw new RangeError(`SmartRate: RedisStore 'refillRate' must be a positive number (received: ${resolvedRefillRate}).`);
+      }
+
+      return this._consumeTokenBucket({
+        key,
+        capacity: resolvedCapacity,
+        refillRate: resolvedRefillRate,
+        cost,
+        now
+      });
     }
 
     if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
@@ -124,6 +191,26 @@ export class RedisStore {
     }
 
     return this._consumeFixedWindow({ key, limit, windowMs });
+  }
+
+  async _consumeTokenBucket({ key, capacity, refillRate, cost = 1, now }) {
+    const rawResult = await this._evalTokenBucketScript(key, now, capacity, refillRate, cost);
+    const [rawAllowed, rawRemaining, rawReset, rawRetryAfter] = Array.isArray(rawResult)
+      ? rawResult
+      : [1, capacity - cost, 1, 0];
+
+    const allowed = Number(rawAllowed) === 1;
+    const remaining = Number(rawRemaining);
+    const reset = Number(rawReset);
+    const retryAfter = Number(rawRetryAfter);
+
+    return {
+      allowed,
+      count: Math.max(0, capacity - remaining),
+      remaining,
+      reset,
+      ...(allowed ? {} : { retryAfter })
+    };
   }
 
   async _consumeFixedWindow({ key, limit, windowMs }) {
