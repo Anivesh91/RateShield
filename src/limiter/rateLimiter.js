@@ -15,14 +15,14 @@ export function cleanupExpiredRecords() {
 
 const defaultKeyGenerator = (req) => req.ip || req.socket?.remoteAddress || '127.0.0.1';
 
-const SUPPORTED_ALGORITHMS = Object.freeze(['fixed-window', 'sliding-window']);
+const SUPPORTED_ALGORITHMS = Object.freeze(['fixed-window', 'sliding-window', 'token-bucket']);
 
 function validateOptions(options) {
   if (!options || typeof options !== 'object') {
     throw new TypeError('SmartRate: Options must be an object.');
   }
 
-  const { limit, windowMs, store, algorithm = 'fixed-window', keyGenerator } = options;
+  const { limit, windowMs, store, algorithm = 'fixed-window', keyGenerator, capacity, refillRate, cost } = options;
 
   if (keyGenerator !== undefined && typeof keyGenerator !== 'function') {
     throw new TypeError("SmartRate: 'keyGenerator' must be a function.");
@@ -34,12 +34,37 @@ function validateOptions(options) {
     );
   }
 
-  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
-    throw new RangeError(`SmartRate: 'limit' must be a positive integer (received: ${limit}).`);
-  }
+  if (algorithm === 'token-bucket') {
+    const effectiveCapacity = capacity ?? limit;
+    if (typeof effectiveCapacity !== 'number' || !Number.isInteger(effectiveCapacity) || effectiveCapacity <= 0) {
+      throw new RangeError(
+        `SmartRate: Token Bucket requires a positive integer 'capacity' (or 'limit') (received: ${effectiveCapacity}).`
+      );
+    }
 
-  if (typeof windowMs !== 'number' || !Number.isFinite(windowMs) || windowMs <= 0) {
-    throw new RangeError(`SmartRate: 'windowMs' must be a positive number in milliseconds (received: ${windowMs}).`);
+    const effectiveRefillRate = refillRate ?? (limit && windowMs ? limit / (windowMs / 1000) : undefined);
+    if (typeof effectiveRefillRate !== 'number' || !Number.isFinite(effectiveRefillRate) || effectiveRefillRate <= 0) {
+      throw new RangeError(
+        `SmartRate: Token Bucket requires a positive number 'refillRate' (or 'limit' and 'windowMs') (received: ${effectiveRefillRate}).`
+      );
+    }
+
+    if (cost !== undefined) {
+      if (typeof cost !== 'number' && typeof cost !== 'function') {
+        throw new TypeError("SmartRate: 'cost' must be a positive integer or a function.");
+      }
+      if (typeof cost === 'number' && (!Number.isInteger(cost) || cost <= 0)) {
+        throw new RangeError(`SmartRate: 'cost' must be a positive integer (received: ${cost}).`);
+      }
+    }
+  } else {
+    if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
+      throw new RangeError(`SmartRate: 'limit' must be a positive integer (received: ${limit}).`);
+    }
+
+    if (typeof windowMs !== 'number' || !Number.isFinite(windowMs) || windowMs <= 0) {
+      throw new RangeError(`SmartRate: 'windowMs' must be a positive number in milliseconds (received: ${windowMs}).`);
+    }
   }
 
   if (store !== undefined && (!store || typeof store.consume !== 'function')) {
@@ -79,10 +104,13 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
 export function rateLimiter(options = {}) {
   validateOptions(options);
 
-  const { limit, windowMs } = options;
+  const { limit, windowMs, capacity, refillRate, cost = 1 } = options;
   const algorithm = options.algorithm || 'fixed-window';
   const store = options.store || defaultMemoryStore;
   const keyGenerator = options.keyGenerator || defaultKeyGenerator;
+
+  const effectiveCapacity = capacity ?? limit;
+  const effectiveRefillRate = refillRate ?? (limit && windowMs ? limit / (windowMs / 1000) : undefined);
 
   return async function rateLimiterMiddleware(req, res, next) {
     try {
@@ -101,10 +129,27 @@ export function rateLimiter(options = {}) {
         clientIdentifier
       });
 
-      const result = await store.consume({ key, limit, windowMs, algorithm });
+      let requestCost = 1;
+      if (typeof cost === 'function') {
+        requestCost = await cost(req);
+      } else if (typeof cost === 'number') {
+        requestCost = cost;
+      }
+
+      const result = await store.consume({
+        key,
+        limit,
+        windowMs,
+        algorithm,
+        capacity: effectiveCapacity,
+        refillRate: effectiveRefillRate,
+        cost: requestCost
+      });
+
+      const headerLimit = effectiveCapacity ?? limit;
 
       setRateLimitHeaders(res, {
-        limit,
+        limit: headerLimit,
         remaining: result.remaining,
         reset: result.reset,
         retryAfter: result.retryAfter
