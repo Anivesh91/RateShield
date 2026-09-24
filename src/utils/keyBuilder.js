@@ -4,6 +4,7 @@
  */
 export function buildRateLimitKey({
   prefix = 'smartrate',
+  algorithm = 'fixed-window',
   method = 'GET',
   route = '/',
   clientIdentifier = '127.0.0.1'
@@ -11,6 +12,10 @@ export function buildRateLimitKey({
   const cleanMethod = (method || 'GET').toUpperCase();
   const cleanRoute = (route || '/').split('?')[0] || '/';
   const cleanId = clientIdentifier || '127.0.0.1';
+
+  if (algorithm && algorithm !== 'fixed-window') {
+    return `${prefix}:${algorithm}:${cleanMethod}:${cleanRoute}:${cleanId}`;
+  }
 
   return `${prefix}:${cleanMethod}:${cleanRoute}:${cleanId}`;
 }

@@ -13,12 +13,20 @@ export function cleanupExpiredRecords() {
   return defaultMemoryStore.cleanupExpiredRecords();
 }
 
+const SUPPORTED_ALGORITHMS = Object.freeze(['fixed-window', 'sliding-window']);
+
 function validateOptions(options) {
   if (!options || typeof options !== 'object') {
     throw new TypeError('SmartRate: Options must be an object.');
   }
 
-  const { limit, windowMs, store } = options;
+  const { limit, windowMs, store, algorithm = 'fixed-window' } = options;
+
+  if (typeof algorithm !== 'string' || !SUPPORTED_ALGORITHMS.includes(algorithm)) {
+    throw new TypeError(
+      `SmartRate: Unsupported algorithm '${algorithm}'. Supported algorithms: ${SUPPORTED_ALGORITHMS.join(', ')}.`
+    );
+  }
 
   if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
     throw new RangeError(`SmartRate: 'limit' must be a positive integer (received: ${limit}).`);
@@ -58,6 +66,7 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
  * @param {Object} options
  * @param {number} options.limit - Max requests allowed in the window
  * @param {number} options.windowMs - Window duration in milliseconds
+ * @param {'fixed-window'|'sliding-window'} [options.algorithm='fixed-window'] - Rate limiting algorithm
  * @param {Object} [options.store] - Store implementation (defaults to MemoryStore)
  * @returns {import('express').RequestHandler}
  */
@@ -65,6 +74,7 @@ export function rateLimiter(options = {}) {
   validateOptions(options);
 
   const { limit, windowMs } = options;
+  const algorithm = options.algorithm || 'fixed-window';
   const store = options.store || defaultMemoryStore;
 
   return async function rateLimiterMiddleware(req, res, next) {
@@ -74,12 +84,13 @@ export function rateLimiter(options = {}) {
       const routeKey = getRouteIdentifier(req);
 
       const key = buildRateLimitKey({
+        algorithm,
         method,
         route: routeKey,
         clientIdentifier: clientIp
       });
 
-      const result = await store.consume({ key, limit, windowMs });
+      const result = await store.consume({ key, limit, windowMs, algorithm });
 
       setRateLimitHeaders(res, {
         limit,
