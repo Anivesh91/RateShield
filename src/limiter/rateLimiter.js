@@ -13,6 +13,8 @@ export function cleanupExpiredRecords() {
   return defaultMemoryStore.cleanupExpiredRecords();
 }
 
+const defaultKeyGenerator = (req) => req.ip || req.socket?.remoteAddress || '127.0.0.1';
+
 const SUPPORTED_ALGORITHMS = Object.freeze(['fixed-window', 'sliding-window']);
 
 function validateOptions(options) {
@@ -20,7 +22,11 @@ function validateOptions(options) {
     throw new TypeError('SmartRate: Options must be an object.');
   }
 
-  const { limit, windowMs, store, algorithm = 'fixed-window' } = options;
+  const { limit, windowMs, store, algorithm = 'fixed-window', keyGenerator } = options;
+
+  if (keyGenerator !== undefined && typeof keyGenerator !== 'function') {
+    throw new TypeError("SmartRate: 'keyGenerator' must be a function.");
+  }
 
   if (typeof algorithm !== 'string' || !SUPPORTED_ALGORITHMS.includes(algorithm)) {
     throw new TypeError(
@@ -76,10 +82,15 @@ export function rateLimiter(options = {}) {
   const { limit, windowMs } = options;
   const algorithm = options.algorithm || 'fixed-window';
   const store = options.store || defaultMemoryStore;
+  const keyGenerator = options.keyGenerator || defaultKeyGenerator;
 
   return async function rateLimiterMiddleware(req, res, next) {
     try {
-      const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+      const rawIdentifier = await keyGenerator(req);
+      const clientIdentifier = (rawIdentifier !== undefined && rawIdentifier !== null && String(rawIdentifier).trim().length > 0)
+        ? String(rawIdentifier).trim()
+        : (req.ip || req.socket?.remoteAddress || '127.0.0.1');
+
       const method = (req.method || 'GET').toUpperCase();
       const routeKey = getRouteIdentifier(req);
 
@@ -87,7 +98,7 @@ export function rateLimiter(options = {}) {
         algorithm,
         method,
         route: routeKey,
-        clientIdentifier: clientIp
+        clientIdentifier
       });
 
       const result = await store.consume({ key, limit, windowMs, algorithm });

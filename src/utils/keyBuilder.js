@@ -11,7 +11,9 @@ export function buildRateLimitKey({
 } = {}) {
   const cleanMethod = (method || 'GET').toUpperCase();
   const cleanRoute = (route || '/').split('?')[0] || '/';
-  const cleanId = clientIdentifier || '127.0.0.1';
+  const cleanId = (clientIdentifier !== undefined && clientIdentifier !== null && String(clientIdentifier).trim().length > 0)
+    ? String(clientIdentifier).trim()
+    : '127.0.0.1';
 
   if (algorithm && algorithm !== 'fixed-window') {
     return `${prefix}:${algorithm}:${cleanMethod}:${cleanRoute}:${cleanId}`;
