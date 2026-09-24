@@ -49,14 +49,14 @@ function getRouteIdentifier(req) {
 }
 
 function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
-  if (typeof res.setHeader !== 'function') return;
+  if (typeof res.setHeader !== 'function' || res.headersSent) return;
 
   res.setHeader('RateLimit-Limit', String(limit));
   res.setHeader('RateLimit-Remaining', String(Math.max(0, remaining)));
-  res.setHeader('RateLimit-Reset', String(Math.max(0, reset)));
+  res.setHeader('RateLimit-Reset', String(Math.max(1, reset)));
 
   if (retryAfter !== undefined) {
-    res.setHeader('Retry-After', String(Math.max(1, retryAfter)));
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil(retryAfter))));
   }
 }
 
