@@ -1,7 +1,7 @@
 {
   "name": "smart-rate",
-  "version": "3.0.0",
-  "description": "Production-ready in-memory and Redis-backed Fixed Window and Rolling Sliding Window rate limiting middleware for Express.js",
+  "version": "4.0.0",
+  "description": "Production-ready distributed rate limiting middleware for Express.js supporting Fixed Window, Rolling Sliding Window, and Token Bucket algorithms with custom identity and dynamic tier-based policies",
   "type": "module",
   "main": "./src/index.js",
   "exports": "./src/index.js",
@@ -10,6 +10,7 @@
     "start": "node examples/express-demo/server.js",
     "demo:multi": "node examples/express-demo/multi-instance.js",
     "demo:sliding": "node examples/express-demo/sliding-demo.js",
+    "demo:saas": "node examples/express-demo/saas-demo.js",
     "test": "node --test"
   },
   "keywords": [
@@ -19,6 +20,9 @@
     "fixed-window",
     "sliding-window",
     "rolling-window",
+    "token-bucket",
+    "multi-tenant",
+    "dynamic-policy",
     "in-memory",
     "redis",
     "distributed",

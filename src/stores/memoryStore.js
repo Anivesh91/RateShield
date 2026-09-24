@@ -31,9 +31,29 @@ export class MemoryStore {
    * @param {number} [params.now=Date.now()] - Timestamp hook for deterministic testing
    * @returns {{ allowed: boolean, count: number, remaining: number, reset: number, retryAfter?: number }}
    */
-  consume({ key, limit, windowMs, algorithm = 'fixed-window', now = Date.now() }) {
+  consume({
+    key,
+    limit,
+    windowMs,
+    algorithm = 'fixed-window',
+    capacity,
+    refillRate,
+    cost = 1,
+    now = Date.now()
+  }) {
     if (algorithm === 'sliding-window') {
       return this._consumeSlidingWindow({ key, limit, windowMs, now });
+    }
+    if (algorithm === 'token-bucket') {
+      const resolvedCapacity = capacity ?? limit;
+      const resolvedRefillRate = refillRate ?? (limit && windowMs ? limit / (windowMs / 1000) : 1);
+      return this._consumeTokenBucket({
+        key,
+        capacity: resolvedCapacity,
+        refillRate: resolvedRefillRate,
+        cost,
+        now
+      });
     }
     return this._consumeFixedWindow({ key, limit, windowMs, now });
   }
@@ -147,9 +167,71 @@ export class MemoryStore {
   }
 
   /**
+   * Token Bucket strategy: Maintains a lightweight bucket with capacity and refillRate.
+   * Refills tokens continuously: newTokens = min(capacity, previousTokens + elapsed * refillRate).
+   * Memory footprint is strictly O(1) per key (stores only tokens float and lastRefillTimestamp).
+   *
+   * @private
+   */
+  _consumeTokenBucket({ key, capacity, refillRate, cost = 1, now }) {
+    let record = this.store.get(key);
+
+    if (!record || record.algorithm !== 'token-bucket') {
+      // First request: bucket starts at full capacity
+      const initialTokens = capacity;
+      record = {
+        algorithm: 'token-bucket',
+        tokens: initialTokens,
+        lastRefillTimestamp: now,
+        capacity,
+        refillRate
+      };
+      this.store.set(key, record);
+    } else {
+      // Bucket exists: update capacity and refillRate in case configuration dynamically changed
+      record.capacity = capacity;
+      record.refillRate = refillRate;
+
+      // Refill tokens based on continuous time elapsed since lastRefillTimestamp
+      const elapsedMs = Math.max(0, now - record.lastRefillTimestamp);
+      if (elapsedMs > 0) {
+        const tokensToAdd = (elapsedMs / 1000) * record.refillRate;
+        record.tokens = Math.min(record.capacity, record.tokens + tokensToAdd);
+        record.lastRefillTimestamp = now;
+      }
+    }
+
+    if (record.tokens >= cost) {
+      record.tokens -= cost;
+      const remaining = Math.max(0, Math.floor(record.tokens));
+      const reset = Math.max(1, Math.ceil((record.capacity - record.tokens) / record.refillRate));
+
+      return {
+        allowed: true,
+        count: Math.max(0, record.capacity - remaining),
+        remaining,
+        reset
+      };
+    }
+
+    // Token deficit: calculate seconds until enough tokens refill to cover requested cost
+    const neededTokens = cost - record.tokens;
+    const retryAfter = Math.max(1, Math.ceil(neededTokens / record.refillRate));
+
+    return {
+      allowed: false,
+      count: record.capacity,
+      remaining: Math.max(0, Math.floor(record.tokens)),
+      reset: retryAfter,
+      retryAfter
+    };
+  }
+
+  /**
    * Scans the Map and removes records whose windows have elapsed.
    * For Sliding Window: prunes expired timestamps and deletes empty keys.
    * For Fixed Window: deletes keys whose fixed bucket has elapsed.
+   * For Token Bucket: deletes keys that have refilled to full and remained idle.
    * Returns the count of removed stale records.
    *
    * @param {number} [now=Date.now()]
@@ -165,6 +247,13 @@ export class MemoryStore {
           record.timestamps.shift();
         }
         if (record.timestamps.length === 0) {
+          this.store.delete(key);
+          removed++;
+        }
+      } else if (record.algorithm === 'token-bucket') {
+        const elapsedMs = now - record.lastRefillTimestamp;
+        const timeToFullMs = Math.max(0, (record.capacity - record.tokens) / record.refillRate) * 1000;
+        if (elapsedMs >= timeToFullMs + this.cleanupIntervalMs) {
           this.store.delete(key);
           removed++;
         }

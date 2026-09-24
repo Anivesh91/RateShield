@@ -31,10 +31,10 @@ describe('SmartRate v3 — Memory Sliding Window Tests', () => {
 
     it('fails fast when algorithm is unrecognized', () => {
       assert.throws(
-        () => rateLimiter({ algorithm: 'token-bucket', limit: 5, windowMs: 60_000 }),
+        () => rateLimiter({ algorithm: 'leaky-bucket', limit: 5, windowMs: 60_000 }),
         {
           name: 'TypeError',
-          message: /Unsupported algorithm 'token-bucket'/
+          message: /Unsupported algorithm 'leaky-bucket'/
         }
       );
 

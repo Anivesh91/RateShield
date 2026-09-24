@@ -1,6 +1,8 @@
-# SmartRate v3
+# SmartRate v4
 
-A production-ready rate limiting middleware for Express.js supporting **Fixed Window** and **Rolling Sliding Window** algorithms. SmartRate provides high-performance, zero-dependency in-memory rate limiting and distributed, atomic Redis-backed rate limiting across multiple application instances.
+A production-ready rate limiting middleware for Express.js supporting **Fixed Window**, **Rolling Sliding Window**, and **Token Bucket** algorithms, **Custom Client Identity** (API Key, User ID, Multi-Tenant), and **Dynamic Tier-Based Policies**.
+
+SmartRate provides high-performance, zero-dependency in-memory rate limiting and distributed, atomic Redis-backed rate limiting across multiple application instances.
 
 > **Repository Note:** The project is named **SmartRate** (npm package `smart-rate`), hosted in the [RateShield](https://github.com/Anivesh91/RateShield) repository.
 
@@ -10,92 +12,101 @@ import { rateLimiter, RedisStore } from 'smart-rate';
 
 const app = express();
 
-// 1. Zero-config: In-memory Rolling Sliding Window (eliminates boundary bursts)
+// 1. Token Bucket: Tier-based SaaS policy with custom identity and weighted costs
+app.use(
+  '/api',
+  rateLimiter({
+    algorithm: 'token-bucket',
+    keyGenerator: (req) => req.headers['x-api-key'],
+    capacity: (req) => (req.user?.tier === 'pro' ? 50 : 10),
+    refillRate: (req) => (req.user?.tier === 'pro' ? 10 : 2),
+    cost: (req) => (req.path.startsWith('/api/export') ? 5 : 1)
+  })
+);
+
+// 2. Rolling Sliding Window: Strictest boundary enforcement for auth
 app.post(
-  '/api/login',
+  '/auth/login',
   rateLimiter({
     algorithm: 'sliding-window',
     limit: 5,
     windowMs: 60_000
   }),
-  loginController
+  loginHandler
 );
 
-// 2. Default Fixed Window (100% backwards-compatible with v1 and v2)
+// 3. Fixed Window: Default high-throughput public endpoint protection
 app.get(
-  '/api/public',
-  rateLimiter({ limit: 10, windowMs: 60_000 }),
-  publicController
+  '/public/status',
+  rateLimiter({ limit: 100, windowMs: 60_000 }),
+  statusHandler
 );
 ```
 
 ---
 
-## What's New in SmartRate v3
+## What's New in SmartRate v4
 
-SmartRate v3 addresses the fundamental weakness of Fixed Window rate limiting: the **boundary-burst vulnerability**.
+SmartRate v4 brings production-grade SaaS rate limiting primitives:
 
-* **Sliding Window Algorithm (`algorithm: 'sliding-window'`)**: Evaluates traffic across a continuously moving half-open interval `(now - windowMs, now]`, guaranteeing that traffic never exceeds the configured quota in *any* rolling duration of length `windowMs`.
-* **Atomic Redis Sorted Sets (ZSET) Engine**: Utilizes Redis ZSETs and an embedded Lua script (`src/scripts/slidingWindow.lua`) to execute pruning, counting, conditional insertion, and dynamic reset extraction in a single, non-interleaved atomic step.
-* **Deterministic Member Uniqueness**: Generates `${now}:${uuid}` identifiers to ensure requests arriving in the exact same millisecond never collapse or leak quota in Redis.
-* **Dynamic Reset & Retry-After Calculations**: In Sliding Window mode, `RateLimit-Reset` and `Retry-After` dynamically calculate the exact number of seconds until the oldest active timestamp slides out of the active window, avoiding artificial blocking.
-* **Algorithm Key Namespacing**: State between Fixed Window (`smartrate:...`) and Sliding Window (`smartrate:sliding-window:...`) is strictly isolated, preventing Redis `WRONGTYPE` conflicts between String counters and Sorted Sets.
-* **100% Backwards Compatibility**: Omitting `algorithm` defaults to `'fixed-window'`. All existing v1 and v2 configurations work without modification.
+* **Token Bucket Algorithm (`algorithm: 'token-bucket'`)**:
+  - Allows natural bursts of traffic up to `capacity` while enforcing a sustained maximum rate through continuous `refillRate` (tokens/sec).
+  - Continuous mathematical refill: tokens replenish lazily based on elapsed time ($\Delta t = now - lastRefill$) without any background timers or cron overhead.
+  - **$O(1)$ Constant Memory Overhead**: Unlike sliding window logs which scale with request volume ($O(N)$), token buckets store only two numbers (`tokens` and `lastRefill`), saving immense memory under high traffic.
+* **Custom Client Identity & Multi-Tenancy (`keyGenerator(req)`)**:
+  - Rate limit by API Key, Authenticated User ID, Organization/Tenant ID, or composite keys (`tenant_123:user_456`).
+  - Safe fallback: Automatically extracts client IP if `keyGenerator` is omitted or returns null/empty.
+* **Dynamic & Tier-Based Policies**:
+  - Configure `limit`, `windowMs`, `capacity`, `refillRate`, and `cost` as dynamic functions `(req) => ...` evaluated per request.
+  - Seamlessly assign different quotas to Free, Pro, and Enterprise tiers within the exact same middleware.
+* **Weighted Request Costs (`cost: (req) => ...`)**:
+  - Charge variable tokens based on operation weight (e.g. lightweight GET consumes 1 token; heavy analytical export consumes 5 tokens).
+* **Distributed Redis Token Bucket with Atomic Lua (`src/scripts/tokenBucket.lua`)**:
+  - Atomic Redis Hash execution (`HMGET` -> continuous refill calculation -> token deduction -> `HSET` -> rolling `EXPIRE`).
+  - Single network roundtrip with zero race conditions under concurrent load.
+  - Dynamic key expiration prevents Redis memory leaks for idle users.
+* **100% Backwards Compatibility**:
+  - Fully supports all v1, v2, and v3 configurations.
+  - Fixed Window remains default when `algorithm` is omitted.
+  - Token Bucket accepts direct `{ capacity, refillRate, cost }` or legacy alias `{ limit, windowMs }`.
 
 ---
 
-## The Boundary-Burst Problem & Solution
+## Algorithm Comparison Matrix
 
-### The Vulnerability in Fixed Window
-
-Fixed Window resets its counter at rigid bucket boundaries ($k \times \text{windowMs}$). A malicious or bursty client can send its full quota at the very end of Window 1 and send another full quota at the start of Window 2:
-
-```text
-Fixed Window: limit = 5 req / 60s
-Window 1: [0s ------------------------------ 59s]  | Window 2: [60s ----------------------------- 120s]
-                                      [5 requests] | [5 requests]
-                                       at t = 59s  |  at t = 60.1s
-                        ───► BURST: 10 requests within ~1.1 seconds! ◄───
-```
-
-Downstream services (databases, authentication microservices) experience a $2 \times N$ traffic spike, risking connection pool exhaustion and denial of service.
-
-### The Sliding Window Solution
-
-SmartRate v3 implements a true rolling window evaluated continuously against the current timestamp `now`:
-
-$$\text{Active Window} = (now - \text{windowMs}, \quad now]$$
-
-```text
-Sliding Window: limit = 5 req / 60s
-At t = 60.1s, the active window is (0.1s, 60.1s].
-The 5 requests sent at t = 59s fall INSIDE this rolling window.
-Therefore, request 6 at t = 60.1s is IMMEDIATELY BLOCKED with HTTP 429!
-                        ───► Maximum 5 requests in ANY 60-second span ◄───
-```
+| Dimension | Fixed Window (`'fixed-window'`) | Sliding Window (`'sliding-window'`) | Token Bucket (`'token-bucket'`) |
+| :--- | :--- | :--- | :--- |
+| **Boundary Burst Prevention** | ❌ Prone to $2 \times N$ bursts at boundaries | ✅ **Strictly eliminated** in rolling window | ✅ **Bounded burst** strictly capped at `capacity` |
+| **Traffic Shaping** | Hard reset each window | Rolling window cutoff | Continuous smooth refill over time |
+| **Memory Complexity** | **$O(1)$** per key (counter + timestamp) | **$O(N)$** per key ($N$ timestamps in ZSET) | **$O(1)$** per key (tokens + lastRefill hash) |
+| **Weighted Request Cost** | ❌ Not supported (1 req = 1 count) | ❌ Not supported | ✅ **Fully supported** (`cost: (req) => ...`) |
+| **Redis Data Structure** | String counter (`INCR`) | Sorted Set (`ZSET`) | Hash (`HMGET` / `HSET`) |
+| **Recommended Use Case** | Coarse public DDoS prevention | High-security auth / login endpoints | **SaaS APIs, multi-tier quotas, heavy data APIs** |
 
 ---
 
 ## Architecture Overview
 
-SmartRate v3 cleanly decouples algorithm strategies from store engines via a unified Store contract:
-
 ```mermaid
 flowchart TD
     Req([HTTP Request]) --> Router[Express Route]
-    Router --> Middleware["SmartRate Middleware<br/>rateLimiter({ algorithm, limit, windowMs, store })"]
-    Middleware --> KeyGen["Extract IP + Method + Route<br/>buildRateLimitKey({ algorithm, method, route, ip })"]
-    KeyGen --> StoreConsume["await store.consume({ key, limit, windowMs, algorithm })"]
+    Router --> Middleware["SmartRate Middleware<br/>rateLimiter({ algorithm, keyGenerator, capacity, refillRate, cost })"]
+    Middleware --> KeyGen["Resolve Identity<br/>await keyGenerator(req) || req.ip"]
+    KeyGen --> BuildKey["buildRateLimitKey({ algorithm, method, route, id })"]
+    BuildKey --> DynamicEval["Resolve Dynamic Policies<br/>resolve capacity(req), refillRate(req), cost(req)"]
+    DynamicEval --> StoreConsume["await store.consume({ key, algorithm, capacity, refillRate, cost })"]
 
     subgraph StoreEngines ["Pluggable Storage Layer"]
         subgraph MemoryStore ["MemoryStore (Local Process)"]
-            M_FW["Fixed Window<br/>(Bucket start timestamp + integer counter)"]
-            M_SW["Sliding Window<br/>(Timestamp queue + array prune <= cutoff)"]
+            M_FW["Fixed Window<br/>(Bucket start timestamp + counter)"]
+            M_SW["Sliding Window<br/>(Timestamp queue + array prune)"]
+            M_TB["Token Bucket<br/>(Fractional tokens + lastRefill timestamp)"]
         end
 
         subgraph RedisStore ["RedisStore (Distributed Cluster)"]
             R_FW["Fixed Window<br/>(INCR + conditional PEXPIRE + PTTL)"]
-            R_SW["Sliding Window (ZSET)<br/>(ZREMRANGEBYSCORE + ZCARD + ZADD + ZRANGE)"]
+            R_SW["Sliding Window (ZSET)<br/>(ZREMRANGEBYSCORE + ZCARD + ZADD)"]
+            R_TB["Token Bucket (Hash + Lua)<br/>(HMGET + Refill + HSET + EXPIRE)"]
         end
     end
 
@@ -113,89 +124,58 @@ flowchart TD
 
 ---
 
-## Technical Deep Dive: Redis Sorted Sets & Lua Atomicity
+## Token Bucket Mechanics & Formula
 
-### The Redis Sliding Window Challenge
+Tokens refill continuously according to the exact elapsed time since the previous request:
 
-Implementing a sliding window across a distributed cluster requires:
-1. Pruning timestamps older than `now - windowMs`.
-2. Counting remaining entries in the window.
-3. Conditionally admitting the request if count $< limit$.
-4. Storing the new request timestamp if admitted.
-5. Determining the oldest timestamp to compute dynamic reset time.
-6. Refreshing key expiration so idle keys are evicted from Redis.
+$$\Delta t = \max(0,\, now - lastRefill)$$
 
-Executing these steps over separate network calls introduces race conditions where multiple server instances interleave reads and writes, resulting in quota leaks.
+$$tokensToAdd = \frac{\Delta t}{1000} \times refillRate$$
 
-### Atomic Execution with `src/scripts/slidingWindow.lua`
+$$currentTokens = \min(capacity,\, prevTokens + tokensToAdd)$$
 
-SmartRate v3 executes all 6 operations atomically on Redis in a single script evaluation:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant App as Express Instance
-    participant Redis as Redis Server (Lua Script)
-
-    App->>Redis: EVAL slidingWindow.lua (key, now, windowMs, limit, member)
-    activate Redis
-    Note over Redis: 1. ZREMRANGEBYSCORE key -inf (now - windowMs)<br/>Prune expired timestamps
-    Note over Redis: 2. currentCount = ZCARD key<br/>Count active requests in rolling window
-    alt currentCount < limit
-        Note over Redis: 3. ZADD key now member<br/>Admit request and record timestamp
-        Note over Redis: allowed = 1, currentCount = currentCount + 1
-    else currentCount >= limit
-        Note over Redis: Quota exhausted: allowed = 0
-    end
-    Note over Redis: 4. oldest = ZRANGE key 0 0 WITHSCORES<br/>Extract oldest active timestamp
-    Note over Redis: 5. PEXPIRE key windowMs<br/>Refresh key TTL for automatic cleanup
-    Redis-->>App: Return [ allowed, currentCount, oldestScore ]
-    deactivate Redis
-```
-
-### Collisions & Millisecond Granularity
-
-If two concurrent requests arrive at the exact same millisecond `now`:
-* Redis ZSET entries require unique member strings; identical members update the existing entry rather than adding a new one.
-* SmartRate v3 generates unique members formatted as `${now}:${crypto.randomUUID()}`.
-* Both requests are stored distinctly with the exact same millisecond score `now`, preventing under-counting under heavy concurrent load.
-
----
-
-## Algorithm Comparison Matrix
-
-| Dimension | Fixed Window (`'fixed-window'`) | Sliding Window (`'sliding-window'`) |
-| :--- | :--- | :--- |
-| **Boundary Burst Prevention** | ❌ Prone to $2 \times N$ bursts at window boundaries | ✅ **Strictly eliminated** across any rolling window |
-| **Memory Consumption** | $O(1)$ per key (single integer counter) | $O(N)$ per key ($N$ timestamps stored in queue/ZSET) |
-| **Compute Overhead** | Very Low (`INCR`) | Low (`ZREMRANGEBYSCORE` + `ZCARD` + `ZADD`) |
-| **Reset Calculation** | Time remaining in current fixed bucket | Dynamic time until the oldest timestamp slides out |
-| **Recommended Use Case** | High-volume public endpoints, coarse DDoS protection | Strict APIs, auth/login endpoints, billing APIs |
+- If $currentTokens \ge cost$:
+  $$currentTokens = currentTokens - cost \implies \text{Allowed (HTTP 200)}$$
+- If $currentTokens < cost$:
+  $$retryAfter = \max\left(1,\, \left\lceil \frac{cost - currentTokens}{refillRate} \right\rceil\right) \implies \text{Blocked (HTTP 429)}$$
 
 ---
 
 ## Usage Guide
 
-### 1. In-Memory Sliding Window (Zero Redis Dependency)
+### 1. Multi-Tier SaaS API with Token Bucket
 
 ```javascript
 import express from 'express';
-import { rateLimiter } from 'smart-rate';
+import { rateLimiter, MemoryStore } from 'smart-rate';
 
 const app = express();
 
-app.post(
-  '/api/auth/login',
+const TIER_CONFIG = {
+  free: { capacity: 5, refillRate: 1 },
+  pro: { capacity: 25, refillRate: 5 },
+  enterprise: { capacity: 100, refillRate: 20 }
+};
+
+app.use(
+  '/api',
   rateLimiter({
-    algorithm: 'sliding-window',
-    limit: 5,
-    windowMs: 15 * 60 * 1000 // 5 requests per 15 minutes rolling
-  }),
-  (req, res) => res.json({ success: true })
+    algorithm: 'token-bucket',
+    keyGenerator: (req) => req.headers['x-api-key'],
+    capacity: (req) => {
+      const tier = req.user?.tier || 'free';
+      return TIER_CONFIG[tier].capacity;
+    },
+    refillRate: (req) => {
+      const tier = req.user?.tier || 'free';
+      return TIER_CONFIG[tier].refillRate;
+    },
+    cost: (req) => (req.path === '/api/export' ? 5 : 1)
+  })
 );
 ```
 
-### 2. Distributed Sliding Window with Redis
+### 2. Distributed Token Bucket with Redis
 
 ```javascript
 import express from 'express';
@@ -204,41 +184,21 @@ import { rateLimiter, RedisStore } from 'smart-rate';
 
 const app = express();
 
-// 1. Create and connect Redis client (application owns connection lifecycle)
-const redisClient = createClient({
-  url: process.env.REDIS_URL || 'redis://localhost:6379'
-});
+const redisClient = createClient({ url: 'redis://localhost:6379' });
 await redisClient.connect();
 
-// 2. Inject client into RedisStore
 const store = new RedisStore({ client: redisClient });
 
-// 3. Configure Sliding Window limiter with shared store
-const distributedLimiter = rateLimiter({
-  algorithm: 'sliding-window',
-  limit: 10,
-  windowMs: 60_000,
-  store
-});
-
-app.use('/api/', distributedLimiter);
-```
-
-### 3. Graceful Shutdown
-
-```javascript
-const server = app.listen(3000);
-
-async function shutdown(signal) {
-  console.log(`Received ${signal}. Shutting down gracefully...`);
-  server.close(async () => {
-    await redisClient.quit();
-    process.exit(0);
-  });
-}
-
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+app.use(
+  '/api',
+  rateLimiter({
+    store,
+    algorithm: 'token-bucket',
+    capacity: 20,
+    refillRate: 2, // 2 tokens refilled per second
+    keyGenerator: (req) => req.headers['x-user-id']
+  })
+);
 ```
 
 ---
@@ -249,110 +209,84 @@ Every rate-limited route attaches standard HTTP rate-limiting headers:
 
 | Header | Example | Description |
 | :--- | :--- | :--- |
-| `RateLimit-Limit` | `10` | Maximum request quota within the rolling window duration |
-| `RateLimit-Remaining` | `4` | Remaining requests allowed in the rolling window (never drops below 0) |
-| `RateLimit-Reset` | `12` | Seconds until the oldest active request slides out and frees a slot |
-| `Retry-After` | `12` | *(Emitted on HTTP 429 only)* Seconds the client must wait before retrying |
-
-### Example Blocked Response (HTTP 429)
-
-```http
-HTTP/1.1 429 Too Many Requests
-Content-Type: application/json; charset=utf-8
-RateLimit-Limit: 5
-RateLimit-Remaining: 0
-RateLimit-Reset: 14
-Retry-After: 14
-
-{
-  "success": false,
-  "message": "Too many requests",
-  "retryAfter": 14
-}
-```
+| `RateLimit-Limit` | `20` | Configured bucket capacity or window quota |
+| `RateLimit-Remaining` | `15` | Current integer tokens remaining (never drops below 0) |
+| `RateLimit-Reset` | `3` | Seconds until the bucket is completely full again |
+| `Retry-After` | `2` | *(Emitted on HTTP 429 only)* Seconds until enough tokens refill to permit the request |
 
 ---
 
 ## Demos & Interactive Scripts
 
-### 1. Algorithm Comparison Demo (Fixed vs Sliding)
-
-Compare Fixed Window and Rolling Sliding Window side-by-side:
-
+### 1. SaaS Multi-Tier & Weighted Cost Demo (v4)
 ```bash
-node examples/express-demo/sliding-demo.js
+npm run demo:saas
+# Or: node examples/express-demo/saas-demo.js
 ```
-* `GET http://localhost:3002/api/fixed` (Fixed Window: 5 req / 10s)
-* `GET http://localhost:3002/api/sliding` (Sliding Window: 5 req / 10s)
+* Free Tier: `curl -H "x-api-key: ak_free_123" http://localhost:3003/api/data`
+* Pro Tier: `curl -H "x-api-key: ak_pro_456" http://localhost:3003/api/data`
+* Heavy Export: `curl -X POST -H "x-api-key: ak_ent_789" http://localhost:3003/api/export`
 
-### 2. Multi-Instance Distributed Redis Demo
-
-Simulate two independent Express instances sharing rate-limit state in Redis:
-
+### 2. Fixed vs. Sliding Window Comparison Demo (v3)
 ```bash
-# Requires local Redis on redis://localhost:6379
-node examples/express-demo/multi-instance.js
+npm run demo:sliding
+# Or: node examples/express-demo/sliding-demo.js
 ```
-* **Instance A**: `http://localhost:3000/api/resource`
-* **Instance B**: `http://localhost:3001/api/resource`
+
+### 3. Distributed Multi-Instance Redis Demo (v2)
+```bash
+npm run demo:multi
+# Or: node examples/express-demo/multi-instance.js
+```
 
 ---
 
-## Verification & Test Suites
+## Verification & Test Catalog (92 Tests)
 
-SmartRate v3 includes 58 automated tests spanning unit logic, boundary conditions, concurrency, and distributed multi-instance architectures:
+Run the full automated test suite:
 
 ```bash
 npm test
 ```
 
-### Complete Test Catalog
+### Test Suites Breakdown
 
-1. **`tests/boundaryBurst.test.js`** (3 tests)
-   - Verifies boundary-burst prevention for tested scenarios on `MemoryStore`.
-   - Verifies boundary-burst prevention for tested scenarios on `RedisStore`.
-   - Proves observable behavioral parity across both storage engines.
-2. **`tests/concurrency.test.js`** (4 tests)
-   - 50 concurrent requests fired via `Promise.all` against Fixed Window in Redis.
-   - 50 concurrent requests fired via `Promise.all` against Sliding Window (ZSET) in Redis.
-   - Multi-client isolation under concurrent parallel load.
-3. **`tests/distributed.test.js`** (5 tests)
-   - Fixed Window shared quota across multiple Express app instances.
-   - Fixed Window client isolation across instances.
-   - Sliding Window shared quota across multiple Express app instances.
-   - Sliding Window client isolation across instances.
-   - Simultaneous concurrent requests distributed across instances.
-4. **`tests/slidingWindow.memory.test.js`** (11 tests)
-   - Algorithm option validation and fail-fast handling.
-   - Rolling interval pruning and half-open boundary cutoffs `(now - windowMs, now]`.
-   - Dynamic reset and retryAfter calculations based on oldest active timestamp.
-   - Periodic sweeper eviction for stale sliding window timestamp records.
-   - Express route integration and header emission.
-5. **`tests/slidingWindow.redis.test.js`** (5 tests)
-   - Redis ZSET quota boundaries ($1 \dots N$ allowed, $N+1$ blocked).
-   - Redis half-open cutoff verification.
-   - Collision-resistant unique ZSET member generation.
-   - State isolation between Fixed and Sliding Window keys on identical routes.
-   - Express route integration and header verification.
-6. **`tests/rateLimiter.test.js`** (13 tests)
-   - Fail-fast parameter validation.
-   - Fixed window quota enforcement.
-   - Route, HTTP method, and client IP isolation.
-   - Query string stripping.
-   - Window expiration and reset.
-   - Custom asynchronous stores and Express error forwarding.
-7. **`tests/memoryStore.test.js`** (5 tests)
-   - Initialization, sequential increments, and reset.
-   - Background interval sweeper eviction (`unref()`).
-   - Key isolation.
-8. **`tests/redisStore.test.js`** (9 tests)
-   - Constructor parameter and dependency validation.
-   - Atomic Lua script invocation.
-   - Fail-fast argument validation and defensive TTL error handling.
-9. **`tests/redis.integration.test.js`** (3 tests)
-   - Redis counter increment and TTL initialization.
-   - TTL countdown and expiration reset.
-   - Method isolation on RedisStore.
+1. **`tests/dynamicPolicy.test.js`** (6 tests) — **[v4]**
+   - Free vs Pro tier quota enforcement under Fixed Window.
+   - Dynamic sliding window quotas based on user role.
+   - Dynamic Token Bucket capacity and refill rates in MemoryStore and RedisStore.
+   - Dynamic weighted request costs for heavy operations.
+   - Fail-fast error propagation to Express error handlers.
+2. **`tests/tokenBucket.redis.test.js`** (7 tests) — **[v4]**
+   - Distributed Redis Token Bucket mechanics and continuous refill.
+   - 50-request parallel concurrency stress tests (zero quota overshoots).
+   - Multi-client parallel isolation.
+   - Accurate RateLimit and Retry-After headers.
+3. **`tests/tokenBucket.memory.test.js`** (12 tests) — **[v4]**
+   - Option validation and fail-fast checks.
+   - Burst allowance and empty bucket blocking.
+   - Continuous fractional refill and capacity clamping.
+   - Weighted costs and idle sweeper eviction.
+4. **`tests/keyGenerator.test.js`** (8 tests) — **[v4]**
+   - Custom identity extraction (API keys, user IDs, headers).
+   - Multi-tenant key namespacing (`tenant:user`).
+   - Graceful fallback to client IP.
+5. **`tests/boundaryBurst.test.js`** (3 tests) — **[v3]**
+   - Boundary burst elimination in Memory and Redis.
+6. **`tests/concurrency.test.js`** (4 tests) — **[v3]**
+   - Concurrency tests for Fixed Window and Sliding Window.
+7. **`tests/distributed.test.js`** (5 tests) — **[v3]**
+   - Cross-instance shared state verification across Express instances.
+8. **`tests/slidingWindow.memory.test.js`** (11 tests) — **[v3]**
+   - In-memory rolling queue mechanics, half-open boundaries, dynamic reset.
+9. **`tests/slidingWindow.redis.test.js`** (5 tests) — **[v3]**
+   - Redis Sorted Set (ZSET) atomic Lua script execution.
+10. **`tests/rateLimiter.test.js`** (13 tests) — **[v1]**
+    - Fixed window mechanics, Express middleware integration.
+11. **`tests/redisStore.test.js`** & **`tests/redis.integration.test.js`** (12 tests) — **[v2]**
+    - Redis connection, atomic Lua execution, TTL eviction.
+12. **`tests/memoryStore.test.js`** (5 tests) — **[v1]**
+    - Memory store unit tests and cleanup sweepers.
 
 ---
 
@@ -360,15 +294,13 @@ npm test
 
 * **v1.0.0**: In-memory Fixed Window rate limiter for Express.js.
 * **v2.0.0**: Pluggable storage architecture, distributed `RedisStore`, and atomic Lua script execution.
-* **v3.0.0 (Current)**:
-  - Rolling Sliding Window rate limiting (`algorithm: 'sliding-window'`).
-  - Redis ZSET storage with atomic Lua pruning and evaluation (`slidingWindow.lua`).
-  - Elimination of the boundary-burst vulnerability.
-  - Multi-instance distributed sliding window coordination.
-  - Dynamic `RateLimit-Reset` and `Retry-After` calculation.
-* **v4.0.0 (Planned)**:
-  - Token Bucket rate limiting algorithm.
-  - Custom key generators (rate limiting by API Key, User ID, or JWT claims).
+* **v3.0.0**: Rolling Sliding Window (`algorithm: 'sliding-window'`) with Redis Sorted Sets (ZSET) and boundary-burst elimination.
+* **v4.0.0 (Current)**:
+  - Token Bucket rate limiting algorithm (`algorithm: 'token-bucket'`).
+  - Atomic Redis Hash storage engine with continuous mathematical refill.
+  - Custom client identity via `keyGenerator(req)`.
+  - Dynamic tier-based policies and weighted request costs (`cost`).
+  - Complete SaaS multi-tier Express demo.
 * **v5.0.0 (Planned)**: Dynamic route template normalization (`/users/:id`).
 * **v6.0.0 (Planned)**: Circuit breakers and configurable fail-open resilience engines.
 * **v7.0.0 (Planned)**: Prometheus and OpenTelemetry metrics instrumentation.
