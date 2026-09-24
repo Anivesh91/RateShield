@@ -1,7 +1,7 @@
 {
   "name": "smart-rate",
-  "version": "2.0.0",
-  "description": "Production-ready in-memory and Redis-backed Fixed Window rate limiting middleware for Express.js",
+  "version": "3.0.0",
+  "description": "Production-ready in-memory and Redis-backed Fixed Window and Rolling Sliding Window rate limiting middleware for Express.js",
   "type": "module",
   "main": "./src/index.js",
   "exports": "./src/index.js",
@@ -9,6 +9,7 @@
     "dev": "node --watch examples/express-demo/server.js",
     "start": "node examples/express-demo/server.js",
     "demo:multi": "node examples/express-demo/multi-instance.js",
+    "demo:sliding": "node examples/express-demo/sliding-demo.js",
     "test": "node --test"
   },
   "keywords": [
@@ -16,10 +17,13 @@
     "express",
     "middleware",
     "fixed-window",
+    "sliding-window",
+    "rolling-window",
     "in-memory",
     "redis",
     "distributed",
     "lua",
+    "zset",
     "smart-rate"
   ],
   "author": "",
