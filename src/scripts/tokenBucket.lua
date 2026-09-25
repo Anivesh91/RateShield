@@ -67,9 +67,17 @@ local fullTimeSec = math.ceil(fullTimeMs / 1000)
 local ttlSeconds = math.max(60, fullTimeSec * 2)
 redis.call("EXPIRE", key, ttlSeconds)
 
--- 5. Calculate reset (seconds until bucket is completely full again)
-local timeToFullMs = math.max(0, (capacity - currentTokens) / refillPerMs)
-local reset = math.max(1, math.ceil(timeToFullMs / 1000))
+-- 5. Calculate reset (Option C semantics):
+-- For Token Bucket, RateLimit-Reset does not represent a fixed-window boundary.
+-- On allowed responses it indicates time to full bucket restoration;
+-- On blocked responses it indicates the next request-eligibility point (matching retryAfter).
+local reset
+if allowed == 1 then
+    local timeToFullMs = math.max(0, (capacity - currentTokens) / refillPerMs)
+    reset = math.max(1, math.ceil(timeToFullMs / 1000))
+else
+    reset = retryAfter
+end
 
 -- Return: [ allowed (1 or 0), remaining, reset, retryAfter ]
 return { allowed, remaining, reset, retryAfter }
