@@ -1,5 +1,6 @@
 import { MemoryStore } from '../stores/memoryStore.js';
 import { buildRateLimitKey } from '../utils/keyBuilder.js';
+import { withTimeout } from '../resilience/timeoutGuard.js';
 
 const defaultMemoryStore = new MemoryStore();
 
@@ -22,7 +23,34 @@ function validateOptions(options) {
     throw new TypeError('SmartRate: Options must be an object.');
   }
 
-  const { limit, windowMs, store, algorithm = 'fixed-window', keyGenerator, capacity, refillRate, refillIntervalMs, cost } = options;
+  const {
+    limit,
+    windowMs,
+    store,
+    algorithm = 'fixed-window',
+    keyGenerator,
+    capacity,
+    refillRate,
+    refillIntervalMs,
+    cost,
+    timeoutMs,
+    onStoreError
+  } = options;
+
+  if (timeoutMs !== undefined && (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+    throw new RangeError(`SmartRate: 'timeoutMs' must be a positive number in milliseconds (received: ${timeoutMs}).`);
+  }
+
+  const VALID_STORE_ERROR_MODES = ['fail-open', 'fail-closed', 'error'];
+  if (
+    onStoreError !== undefined &&
+    typeof onStoreError !== 'function' &&
+    !VALID_STORE_ERROR_MODES.includes(onStoreError)
+  ) {
+    throw new TypeError(
+      `SmartRate: 'onStoreError' must be 'fail-open', 'fail-closed', 'error', or a function (received: ${onStoreError}).`
+    );
+  }
 
   if (keyGenerator !== undefined && typeof keyGenerator !== 'function') {
     throw new TypeError("SmartRate: 'keyGenerator' must be a function.");
@@ -132,6 +160,8 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
  * @param {number|Function} [options.refillRate] - Token bucket refill rate (or dynamic function)
  * @param {number|Function} [options.refillIntervalMs=1000] - Refill interval duration in milliseconds (or dynamic function)
  * @param {number|Function} [options.cost=1] - Request cost in tokens (or dynamic function)
+ * @param {number} [options.timeoutMs=250] - Store operation timeout in milliseconds
+ * @param {'fail-open'|'fail-closed'|'error'|Function} [options.onStoreError] - Policy when store errors or times out
  * @param {Function} [options.keyGenerator] - Custom client identifier extractor
  * @param {Object} [options.store] - Store implementation (defaults to MemoryStore)
  * @returns {import('express').RequestHandler}
@@ -139,7 +169,16 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
 export function rateLimiter(options = {}) {
   validateOptions(options);
 
-  const { limit, windowMs, capacity, refillRate, refillIntervalMs = 1000, cost = 1 } = options;
+  const {
+    limit,
+    windowMs,
+    capacity,
+    refillRate,
+    refillIntervalMs = 1000,
+    cost = 1,
+    timeoutMs = 250,
+    onStoreError
+  } = options;
   const algorithm = options.algorithm || 'fixed-window';
   const store = options.store || defaultMemoryStore;
   const keyGenerator = options.keyGenerator || defaultKeyGenerator;
@@ -214,16 +253,52 @@ export function rateLimiter(options = {}) {
         }
       }
 
-      const result = await store.consume({
-        key,
-        limit: resolvedLimit,
-        windowMs: resolvedWindowMs,
-        algorithm,
-        capacity: resolvedCapacity,
-        refillRate: resolvedRefillRate,
-        refillIntervalMs: resolvedRefillIntervalMs,
-        cost: requestCost
-      });
+      let result;
+      try {
+        result = await withTimeout(
+          store.consume({
+            key,
+            limit: resolvedLimit,
+            windowMs: resolvedWindowMs,
+            algorithm,
+            capacity: resolvedCapacity,
+            refillRate: resolvedRefillRate,
+            refillIntervalMs: resolvedRefillIntervalMs,
+            cost: requestCost
+          }),
+          timeoutMs
+        );
+      } catch (storeError) {
+        if (typeof res.setHeader === 'function' && !res.headersSent) {
+          res.setHeader('RateLimit-Degraded', 'true');
+        }
+
+        req.rateLimit = {
+          degraded: true,
+          storeError
+        };
+
+        if (onStoreError === 'fail-open') {
+          return next();
+        }
+
+        if (onStoreError === 'fail-closed') {
+          if (typeof res.setHeader === 'function' && !res.headersSent) {
+            res.setHeader('Retry-After', '30');
+          }
+          return res.status(503).json({
+            success: false,
+            error: 'Service Unavailable',
+            message: 'Rate limiting service temporarily unavailable'
+          });
+        }
+
+        if (typeof onStoreError === 'function') {
+          return onStoreError(storeError, req, res, next);
+        }
+
+        return next(storeError);
+      }
 
       const headerLimit = algorithm === 'token-bucket' ? resolvedCapacity : resolvedLimit;
 
