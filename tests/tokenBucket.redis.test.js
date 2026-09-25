@@ -20,7 +20,10 @@ function createAtomicRedisClient() {
           const now = Number(options.arguments[0]);
           const capacity = Number(options.arguments[1]);
           const refillRate = Number(options.arguments[2]);
-          const cost = Number(options.arguments[3]) || 1;
+          const refillIntervalMs = Number(options.arguments[3]) || 1000;
+          const cost = Number(options.arguments[4]) || 1;
+
+          const refillPerMs = refillRate / refillIntervalMs;
 
           let entry = hashes.get(key);
           let currentTokens = capacity;
@@ -28,7 +31,7 @@ function createAtomicRedisClient() {
 
           if (entry) {
             const elapsedMs = Math.max(0, now - entry.lastRefill);
-            const tokensToAdd = (elapsedMs / 1000) * refillRate;
+            const tokensToAdd = elapsedMs * refillPerMs;
             currentTokens = Math.min(capacity, entry.tokens + tokensToAdd);
             lastRefill = now;
           }
@@ -46,12 +49,14 @@ function createAtomicRedisClient() {
             allowed = 0;
             remaining = Math.floor(currentTokens);
             const neededTokens = cost - currentTokens;
-            retryAfter = Math.max(1, Math.ceil(neededTokens / refillRate));
+            const waitMs = neededTokens / refillPerMs;
+            retryAfter = Math.max(1, Math.ceil(waitMs / 1000));
           }
 
           hashes.set(key, { tokens: currentTokens, lastRefill });
 
-          const reset = Math.max(1, Math.ceil((capacity - currentTokens) / refillRate));
+          const timeToFullMs = Math.max(0, (capacity - currentTokens) / refillPerMs);
+          const reset = Math.max(1, Math.ceil(timeToFullMs / 1000));
           resolve([allowed, remaining, reset, retryAfter]);
         });
       });
@@ -166,6 +171,120 @@ describe('SmartRate v4 — Redis Token Bucket & Concurrency Tests', () => {
 
       const blocked = await redisStore.consume({ key, capacity, refillRate, algorithm: 'token-bucket', now: tFuture });
       assert.equal(blocked.allowed, false);
+    });
+
+    it('throws RangeError when refillIntervalMs is <= 0 or non-finite in RedisStore', async () => {
+      const redisClient = createAtomicRedisClient();
+      const redisStore = new RedisStore({ client: redisClient });
+      const key = 'smartrate:token-bucket:GET:/redis-invalid:10.0.0.99';
+
+      await assert.rejects(
+        async () => redisStore.consume({ key, capacity: 5, refillRate: 1, refillIntervalMs: 0, algorithm: 'token-bucket' }),
+        { name: 'RangeError', message: /refillIntervalMs/ }
+      );
+
+      await assert.rejects(
+        async () => redisStore.consume({ key, capacity: 5, refillRate: 1, refillIntervalMs: -100, algorithm: 'token-bucket' }),
+        { name: 'RangeError', message: /refillIntervalMs/ }
+      );
+    });
+
+    it('supports custom refillIntervalMs in RedisStore (e.g. 100 tokens per 60,000ms)', async () => {
+      const redisClient = createAtomicRedisClient();
+      const redisStore = new RedisStore({ client: redisClient });
+
+      const key = 'smartrate:token-bucket:GET:/redis-interval:10.0.0.5';
+      const capacity = 5;
+      const refillRate = 100;
+      const refillIntervalMs = 60_000; // 100 tokens per minute -> 1 token every 600ms
+      const t0 = 100_000;
+
+      // Drain all 5 tokens at t0
+      for (let i = 0; i < 5; i++) {
+        const res = await redisStore.consume({
+          key,
+          capacity,
+          refillRate,
+          refillIntervalMs,
+          algorithm: 'token-bucket',
+          now: t0
+        });
+        assert.equal(res.allowed, true);
+      }
+
+      // Blocked at t0
+      const blocked = await redisStore.consume({
+        key,
+        capacity,
+        refillRate,
+        refillIntervalMs,
+        algorithm: 'token-bucket',
+        now: t0
+      });
+      assert.equal(blocked.allowed, false);
+
+      // Advance 300ms: 300 * (100 / 60000) = 0.5 tokens. Still < 1, so BLOCKED!
+      const t300 = t0 + 300;
+      const res300 = await redisStore.consume({
+        key,
+        capacity,
+        refillRate,
+        refillIntervalMs,
+        algorithm: 'token-bucket',
+        now: t300
+      });
+      assert.equal(res300.allowed, false);
+
+      // Advance 600ms: 600 * (100 / 60000) = 1.0 token. Now >= 1, so ALLOWED!
+      const t600 = t0 + 600;
+      const res600 = await redisStore.consume({
+        key,
+        capacity,
+        refillRate,
+        refillIntervalMs,
+        algorithm: 'token-bucket',
+        now: t600
+      });
+      assert.equal(res600.allowed, true);
+      assert.equal(res600.remaining, 0);
+    });
+
+    it('calculates smart Retry-After for 1 token in RedisStore', async () => {
+      const redisClient = createAtomicRedisClient();
+      const redisStore = new RedisStore({ client: redisClient });
+
+      const key = 'smartrate:token-bucket:GET:/redis-smart-retry:10.0.0.6';
+      const capacity = 10;
+      const refillRate = 2; // 2 tokens/sec
+      const refillIntervalMs = 1000;
+      const t0 = 100_000;
+
+      // Drain all 10 tokens
+      for (let i = 0; i < 10; i++) {
+        await redisStore.consume({
+          key,
+          capacity,
+          refillRate,
+          refillIntervalMs,
+          algorithm: 'token-bucket',
+          now: t0
+        });
+      }
+
+      // Advance 100ms: 0.2 tokens refilled. Missing 0.8 tokens.
+      // waitMs = 0.8 / 0.002 = 400ms -> ceil(400/1000) = 1 second.
+      const t100 = t0 + 100;
+      const blockedRes = await redisStore.consume({
+        key,
+        capacity,
+        refillRate,
+        refillIntervalMs,
+        algorithm: 'token-bucket',
+        now: t100
+      });
+
+      assert.equal(blockedRes.allowed, false);
+      assert.equal(blockedRes.retryAfter, 1);
     });
 
     it('handles weighted request costs in RedisStore', async () => {
