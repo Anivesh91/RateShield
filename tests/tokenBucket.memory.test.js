@@ -65,11 +65,39 @@ describe('SmartRate v4 — Memory Token Bucket Unit & Integration Tests', () => 
       );
     });
 
-    it('accepts valid capacity and refillRate or limit and windowMs alias mapping', () => {
+    it('throws RangeError when refillIntervalMs is <= 0, non-finite, or invalid type', () => {
+      assert.throws(
+        () => rateLimiter({ algorithm: 'token-bucket', capacity: 5, refillRate: 1, refillIntervalMs: 0 }),
+        { name: 'RangeError', message: /positive number 'refillIntervalMs'/ }
+      );
+
+      assert.throws(
+        () => rateLimiter({ algorithm: 'token-bucket', capacity: 5, refillRate: 1, refillIntervalMs: -500 }),
+        { name: 'RangeError', message: /positive number 'refillIntervalMs'/ }
+      );
+
+      assert.throws(
+        () => rateLimiter({ algorithm: 'token-bucket', capacity: 5, refillRate: 1, refillIntervalMs: NaN }),
+        { name: 'RangeError', message: /positive number 'refillIntervalMs'/ }
+      );
+
+      assert.throws(
+        () => rateLimiter({ algorithm: 'token-bucket', capacity: 5, refillRate: 1, refillIntervalMs: Infinity }),
+        { name: 'RangeError', message: /positive number 'refillIntervalMs'/ }
+      );
+
+      assert.throws(
+        () => rateLimiter({ algorithm: 'token-bucket', capacity: 5, refillRate: 1, refillIntervalMs: '1000' }),
+        { name: 'RangeError', message: /positive number 'refillIntervalMs'/ }
+      );
+    });
+
+    it('accepts valid capacity, refillRate, refillIntervalMs or limit/windowMs mapping', () => {
       const explicitLimiter = rateLimiter({
         algorithm: 'token-bucket',
         capacity: 10,
-        refillRate: 2
+        refillRate: 2,
+        refillIntervalMs: 2000
       });
       assert.equal(typeof explicitLimiter, 'function');
 
@@ -168,6 +196,96 @@ describe('SmartRate v4 — Memory Token Bucket Unit & Integration Tests', () => 
 
       const blocked5 = store.consume({ key, capacity, refillRate, algorithm: 'token-bucket', now: tFuture });
       assert.equal(blocked5.allowed, false, '5th request exceeding capacity must be blocked');
+    });
+
+    it('supports custom refillIntervalMs (e.g. 100 tokens per 60,000ms continuous refill)', () => {
+      const store = new MemoryStore();
+      const key = 'tb:interval:test';
+      const capacity = 5;
+      const refillRate = 100;
+      const refillIntervalMs = 60_000; // 100 tokens per minute -> 1 token every 600ms
+      const t0 = 100_000;
+
+      // Drain all 5 tokens at t0
+      for (let i = 0; i < 5; i++) {
+        const res = store.consume({
+          key,
+          capacity,
+          refillRate,
+          refillIntervalMs,
+          algorithm: 'token-bucket',
+          now: t0
+        });
+        assert.equal(res.allowed, true);
+      }
+
+      // Blocked at t0
+      const blockedT0 = store.consume({
+        key,
+        capacity,
+        refillRate,
+        refillIntervalMs,
+        algorithm: 'token-bucket',
+        now: t0
+      });
+      assert.equal(blockedT0.allowed, false);
+
+      // Advance 300ms: 300 * (100 / 60000) = 0.5 tokens accumulated. Still < 1, so BLOCKED!
+      const t300 = t0 + 300;
+      const res300 = store.consume({
+        key,
+        capacity,
+        refillRate,
+        refillIntervalMs,
+        algorithm: 'token-bucket',
+        now: t300
+      });
+      assert.equal(res300.allowed, false);
+      assert.equal(res300.remaining, 0);
+
+      // Advance 600ms: 600 * (100 / 60000) = 1.0 token accumulated. Now >= 1, so ALLOWED!
+      const t600 = t0 + 600;
+      const res600 = store.consume({
+        key,
+        capacity,
+        refillRate,
+        refillIntervalMs,
+        algorithm: 'token-bucket',
+        now: t600
+      });
+      assert.equal(res600.allowed, true);
+      assert.equal(res600.remaining, 0);
+    });
+
+    it('calculates smart Retry-After for 1 token instead of waiting for full bucket refill', () => {
+      const store = new MemoryStore();
+      const key = 'tb:retryafter:test';
+      const capacity = 10;
+      const refillRate = 2; // 2 tokens/sec
+      const refillIntervalMs = 1000;
+      const t0 = 100_000;
+
+      // Drain all 10 tokens at t0
+      for (let i = 0; i < 10; i++) {
+        store.consume({ key, capacity, refillRate, refillIntervalMs, algorithm: 'token-bucket', now: t0 });
+      }
+
+      // Advance 100ms -> 0.2 tokens refilled. Missing 0.8 tokens to reach 1.0 token.
+      // 0.8 tokens at 0.002 tokens/ms requires 400ms.
+      // In seconds: ceil(400 / 1000) = 1 second.
+      // (Full bucket refill would have been 9.8 / 2 = 5 seconds)
+      const t100 = t0 + 100;
+      const blockedRes = store.consume({
+        key,
+        capacity,
+        refillRate,
+        refillIntervalMs,
+        algorithm: 'token-bucket',
+        now: t100
+      });
+
+      assert.equal(blockedRes.allowed, false);
+      assert.equal(blockedRes.retryAfter, 1);
     });
 
     it('handles weighted request costs (e.g. cost = 5 for expensive operation)', () => {
