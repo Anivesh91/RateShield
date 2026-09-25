@@ -7,14 +7,11 @@ import { rateLimiter, MemoryStore, RedisStore } from '../src/index.js';
 /**
  * Creates an in-memory atomic Redis client simulator supporting Token Bucket Lua semantics.
  */
-function createDistributedRedisClient() {
-  const hashes = new Map();
-  let queue = Promise.resolve();
-
+function createDistributedRedisClient(hashes = new Map(), queueRef = { current: Promise.resolve() }) {
   return {
     async eval(script, options) {
       return new Promise((resolve) => {
-        queue = queue.then(async () => {
+        queueRef.current = queueRef.current.then(async () => {
           const key = options.keys[0];
           const now = Number(options.arguments[0]);
           const capacity = Number(options.arguments[1]);
@@ -236,22 +233,36 @@ describe('SmartRate v5 — Day 3: Token Bucket Concurrency, Identity, Distribute
 
   describe('2. Multi-Instance Shared Token Bucket (Distributed Redis)', () => {
     it('enforces a shared Token Bucket across multiple Express instances with zero local leaks', async () => {
-      const sharedRedisClient = createDistributedRedisClient();
-      const store = new RedisStore({ client: sharedRedisClient });
+      // Two distinct Redis clients simulating separate Node processes/containers pointing to the same Redis database
+      const sharedStorage = new Map();
+      const sharedQueue = { current: Promise.resolve() };
+      const clientA = createDistributedRedisClient(sharedStorage, sharedQueue);
+      const clientB = createDistributedRedisClient(sharedStorage, sharedQueue);
 
-      const limiter = rateLimiter({
+      const storeA = new RedisStore({ client: clientA });
+      const storeB = new RedisStore({ client: clientB });
+
+      const limiterA = rateLimiter({
         algorithm: 'token-bucket',
         capacity: 4,
         refillRate: 1,
         refillIntervalMs: 1000,
-        store
+        store: storeA
+      });
+
+      const limiterB = rateLimiter({
+        algorithm: 'token-bucket',
+        capacity: 4,
+        refillRate: 1,
+        refillIntervalMs: 1000,
+        store: storeB
       });
 
       const appA = createExpressApp();
-      appA.get('/api/shared', limiter, (req, res) => res.json({ instance: 'A' }));
+      appA.get('/api/shared', limiterA, (req, res) => res.json({ instance: 'A' }));
 
       const appB = createExpressApp();
-      appB.get('/api/shared', limiter, (req, res) => res.json({ instance: 'B' }));
+      appB.get('/api/shared', limiterB, (req, res) => res.json({ instance: 'B' }));
 
       const clientIp = '198.51.100.42';
 
