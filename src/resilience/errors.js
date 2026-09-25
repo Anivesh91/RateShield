@@ -3,10 +3,11 @@
  */
 export class StoreTimeoutError extends Error {
   /**
-   * @param {number} timeoutMs - Configured timeout threshold in milliseconds
+   * @param {number} [timeoutMs=250] - Configured timeout threshold in milliseconds
+   * @param {string} [message] - Optional custom error message
    */
-  constructor(timeoutMs) {
-    super(`SmartRate: Rate limit store operation timed out after ${timeoutMs}ms.`);
+  constructor(timeoutMs = 250, message) {
+    super(message || `SmartRate: Rate limit store operation timed out after ${timeoutMs}ms.`);
     this.name = 'StoreTimeoutError';
     this.isTimeout = true;
     this.code = 'ERR_STORE_TIMEOUT';
