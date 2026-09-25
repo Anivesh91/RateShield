@@ -53,8 +53,13 @@ function createMockRedisClient() {
       }
 
       hashes.set(key, { tokens: currentTokens, lastRefill });
-      const timeToFullMs = Math.max(0, (capacity - currentTokens) / refillPerMs);
-      const reset = Math.max(1, Math.ceil(timeToFullMs / 1000));
+      let reset;
+      if (allowed === 1) {
+        const timeToFullMs = Math.max(0, (capacity - currentTokens) / refillPerMs);
+        reset = Math.max(1, Math.ceil(timeToFullMs / 1000));
+      } else {
+        reset = retryAfter;
+      }
       return [allowed, remaining, reset, retryAfter];
     },
     async sendCommand() {

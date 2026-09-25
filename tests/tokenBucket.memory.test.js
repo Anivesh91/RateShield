@@ -286,6 +286,7 @@ describe('SmartRate v4 — Memory Token Bucket Unit & Integration Tests', () => 
 
       assert.equal(blockedRes.allowed, false);
       assert.equal(blockedRes.retryAfter, 1);
+      assert.equal(blockedRes.reset, 1);
     });
 
     it('handles weighted request costs (e.g. cost = 5 for expensive operation)', () => {
@@ -306,6 +307,7 @@ describe('SmartRate v4 — Memory Token Bucket Unit & Integration Tests', () => 
       assert.equal(r2.remaining, 4);
       // Missing tokens = 5 - 4 = 1 token. At 2 tokens/sec, ceil(1/2) = 1s
       assert.equal(r2.retryAfter, 1);
+      assert.equal(r2.reset, 1);
 
       // Light request: cost = 2 (Tokens: 4 -> 2) -> ALLOWED!
       const r3 = store.consume({ key, capacity, refillRate, cost: 2, algorithm: 'token-bucket', now: t0 });

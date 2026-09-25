@@ -55,8 +55,13 @@ function createAtomicRedisClient() {
 
           hashes.set(key, { tokens: currentTokens, lastRefill });
 
-          const timeToFullMs = Math.max(0, (capacity - currentTokens) / refillPerMs);
-          const reset = Math.max(1, Math.ceil(timeToFullMs / 1000));
+          let reset;
+          if (allowed === 1) {
+            const timeToFullMs = Math.max(0, (capacity - currentTokens) / refillPerMs);
+            reset = Math.max(1, Math.ceil(timeToFullMs / 1000));
+          } else {
+            reset = retryAfter;
+          }
           resolve([allowed, remaining, reset, retryAfter]);
         });
       });
@@ -285,6 +290,7 @@ describe('SmartRate v4 — Redis Token Bucket & Concurrency Tests', () => {
 
       assert.equal(blockedRes.allowed, false);
       assert.equal(blockedRes.retryAfter, 1);
+      assert.equal(blockedRes.reset, 1);
     });
 
     it('handles weighted request costs in RedisStore', async () => {
@@ -306,6 +312,7 @@ describe('SmartRate v4 — Redis Token Bucket & Concurrency Tests', () => {
       assert.equal(rBlocked.allowed, false);
       assert.equal(rBlocked.remaining, 3);
       assert.equal(rBlocked.retryAfter, 2); // 5 - 3 = 2 tokens missing, 1 token/sec = 2s
+      assert.equal(rBlocked.reset, 2);
 
       // Light request needing 2 tokens -> ALLOWED
       const rLight = await redisStore.consume({ key, capacity, refillRate, cost: 2, algorithm: 'token-bucket', now: t0 });
