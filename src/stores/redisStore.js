@@ -105,16 +105,17 @@ export class RedisStore {
    * @param {string} key - Rate-limit key
    * @param {number} now - Timestamp in milliseconds
    * @param {number} capacity - Maximum bucket capacity
-   * @param {number} refillRate - Refill rate in tokens per second
-   * @param {number} cost - Tokens to consume
+   * @param {number} refillRate - Refill rate
+   * @param {number} [refillIntervalMs=1000] - Refill interval duration in milliseconds
+   * @param {number} [cost=1] - Tokens to consume
    * @returns {Promise<[number, number, number, number]>} [allowed (1 or 0), remaining, reset, retryAfter]
    * @private
    */
-  async _evalTokenBucketScript(key, now, capacity, refillRate, cost) {
+  async _evalTokenBucketScript(key, now, capacity, refillRate, refillIntervalMs = 1000, cost = 1) {
     if (typeof this.client.eval === 'function') {
       return this.client.eval(this.tokenBucketScript, {
         keys: [key],
-        arguments: [String(now), String(capacity), String(refillRate), String(cost)]
+        arguments: [String(now), String(capacity), String(refillRate), String(refillIntervalMs), String(cost)]
       });
     }
 
@@ -126,6 +127,7 @@ export class RedisStore {
       String(now),
       String(capacity),
       String(refillRate),
+      String(refillIntervalMs),
       String(cost)
     ]);
   }
@@ -139,7 +141,8 @@ export class RedisStore {
    * @param {number} [params.windowMs] - Window duration in milliseconds
    * @param {'fixed-window'|'sliding-window'|'token-bucket'} [params.algorithm='fixed-window'] - Selected algorithm
    * @param {number} [params.capacity] - Token bucket capacity
-   * @param {number} [params.refillRate] - Token bucket refill rate in tokens/sec
+   * @param {number} [params.refillRate] - Token bucket refill rate
+   * @param {number} [params.refillIntervalMs=1000] - Refill interval in milliseconds
    * @param {number} [params.cost=1] - Request cost in tokens
    * @param {number} [params.now=Date.now()] - Timestamp hook for deterministic testing
    * @returns {Promise<{ allowed: boolean, count: number, remaining: number, reset: number, retryAfter?: number }>}
@@ -151,6 +154,7 @@ export class RedisStore {
     algorithm = 'fixed-window',
     capacity,
     refillRate,
+    refillIntervalMs = 1000,
     cost = 1,
     now = Date.now()
   }) {
@@ -169,10 +173,15 @@ export class RedisStore {
         throw new RangeError(`SmartRate: RedisStore 'refillRate' must be a positive number (received: ${resolvedRefillRate}).`);
       }
 
+      if (typeof refillIntervalMs !== 'number' || !Number.isFinite(refillIntervalMs) || refillIntervalMs <= 0) {
+        throw new RangeError(`SmartRate: RedisStore 'refillIntervalMs' must be a positive number (received: ${refillIntervalMs}).`);
+      }
+
       return this._consumeTokenBucket({
         key,
         capacity: resolvedCapacity,
         refillRate: resolvedRefillRate,
+        refillIntervalMs,
         cost,
         now
       });
@@ -193,8 +202,8 @@ export class RedisStore {
     return this._consumeFixedWindow({ key, limit, windowMs });
   }
 
-  async _consumeTokenBucket({ key, capacity, refillRate, cost = 1, now }) {
-    const rawResult = await this._evalTokenBucketScript(key, now, capacity, refillRate, cost);
+  async _consumeTokenBucket({ key, capacity, refillRate, refillIntervalMs = 1000, cost = 1, now }) {
+    const rawResult = await this._evalTokenBucketScript(key, now, capacity, refillRate, refillIntervalMs, cost);
     const [rawAllowed, rawRemaining, rawReset, rawRetryAfter] = Array.isArray(rawResult)
       ? rawResult
       : [1, capacity - cost, 1, 0];

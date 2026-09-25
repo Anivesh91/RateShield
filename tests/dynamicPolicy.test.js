@@ -19,7 +19,10 @@ function createMockRedisClient() {
       const now = Number(options.arguments[0]);
       const capacity = Number(options.arguments[1]);
       const refillRate = Number(options.arguments[2]);
-      const cost = Number(options.arguments[3]) || 1;
+      const refillIntervalMs = Number(options.arguments[3]) || 1000;
+      const cost = Number(options.arguments[4]) || 1;
+
+      const refillPerMs = refillRate / refillIntervalMs;
 
       let entry = hashes.get(key);
       let currentTokens = capacity;
@@ -27,7 +30,7 @@ function createMockRedisClient() {
 
       if (entry) {
         const elapsedMs = Math.max(0, now - entry.lastRefill);
-        const tokensToAdd = (elapsedMs / 1000) * refillRate;
+        const tokensToAdd = elapsedMs * refillPerMs;
         currentTokens = Math.min(capacity, entry.tokens + tokensToAdd);
         lastRefill = now;
       }
@@ -45,11 +48,18 @@ function createMockRedisClient() {
         allowed = 0;
         remaining = Math.floor(currentTokens);
         const neededTokens = cost - currentTokens;
-        retryAfter = Math.max(1, Math.ceil(neededTokens / refillRate));
+        const waitMs = neededTokens / refillPerMs;
+        retryAfter = Math.max(1, Math.ceil(waitMs / 1000));
       }
 
       hashes.set(key, { tokens: currentTokens, lastRefill });
-      const reset = Math.max(1, Math.ceil((capacity - currentTokens) / refillRate));
+      let reset;
+      if (allowed === 1) {
+        const timeToFullMs = Math.max(0, (capacity - currentTokens) / refillPerMs);
+        reset = Math.max(1, Math.ceil(timeToFullMs / 1000));
+      } else {
+        reset = retryAfter;
+      }
       return [allowed, remaining, reset, retryAfter];
     },
     async sendCommand() {

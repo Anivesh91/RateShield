@@ -38,6 +38,7 @@ export class MemoryStore {
     algorithm = 'fixed-window',
     capacity,
     refillRate,
+    refillIntervalMs = 1000,
     cost = 1,
     now = Date.now()
   }) {
@@ -51,6 +52,7 @@ export class MemoryStore {
         key,
         capacity: resolvedCapacity,
         refillRate: resolvedRefillRate,
+        refillIntervalMs,
         cost,
         now
       });
@@ -173,7 +175,8 @@ export class MemoryStore {
    *
    * @private
    */
-  _consumeTokenBucket({ key, capacity, refillRate, cost = 1, now }) {
+  _consumeTokenBucket({ key, capacity, refillRate, refillIntervalMs = 1000, cost = 1, now }) {
+    const refillPerMs = refillRate / refillIntervalMs;
     let record = this.store.get(key);
 
     if (!record || record.algorithm !== 'token-bucket') {
@@ -184,18 +187,20 @@ export class MemoryStore {
         tokens: initialTokens,
         lastRefillTimestamp: now,
         capacity,
-        refillRate
+        refillRate,
+        refillIntervalMs
       };
       this.store.set(key, record);
     } else {
-      // Bucket exists: update capacity and refillRate in case configuration dynamically changed
+      // Bucket exists: update capacity, refillRate, and refillIntervalMs in case configuration dynamically changed
       record.capacity = capacity;
       record.refillRate = refillRate;
+      record.refillIntervalMs = refillIntervalMs;
 
-      // Refill tokens based on continuous time elapsed since lastRefillTimestamp
+      // Refill tokens based on continuous time elapsed: elapsedMs * (refillRate / refillIntervalMs)
       const elapsedMs = Math.max(0, now - record.lastRefillTimestamp);
       if (elapsedMs > 0) {
-        const tokensToAdd = (elapsedMs / 1000) * record.refillRate;
+        const tokensToAdd = elapsedMs * refillPerMs;
         record.tokens = Math.min(record.capacity, record.tokens + tokensToAdd);
         record.lastRefillTimestamp = now;
       }
@@ -204,7 +209,8 @@ export class MemoryStore {
     if (record.tokens >= cost) {
       record.tokens -= cost;
       const remaining = Math.max(0, Math.floor(record.tokens));
-      const reset = Math.max(1, Math.ceil((record.capacity - record.tokens) / record.refillRate));
+      const timeToFullMs = Math.max(0, (record.capacity - record.tokens) / refillPerMs);
+      const reset = Math.max(1, Math.ceil(timeToFullMs / 1000));
 
       return {
         allowed: true,
@@ -214,9 +220,10 @@ export class MemoryStore {
       };
     }
 
-    // Token deficit: calculate seconds until enough tokens refill to cover requested cost
+    // Token deficit: smart Retry-After calculates time until enough tokens exist for this request
     const neededTokens = cost - record.tokens;
-    const retryAfter = Math.max(1, Math.ceil(neededTokens / record.refillRate));
+    const waitMs = neededTokens / refillPerMs;
+    const retryAfter = Math.max(1, Math.ceil(waitMs / 1000));
 
     return {
       allowed: false,
@@ -252,7 +259,8 @@ export class MemoryStore {
         }
       } else if (record.algorithm === 'token-bucket') {
         const elapsedMs = now - record.lastRefillTimestamp;
-        const timeToFullMs = Math.max(0, (record.capacity - record.tokens) / record.refillRate) * 1000;
+        const refillPerMs = (record.refillRate || 1) / (record.refillIntervalMs || 1000);
+        const timeToFullMs = Math.max(0, (record.capacity - record.tokens) / refillPerMs);
         if (elapsedMs >= timeToFullMs + this.cleanupIntervalMs) {
           this.store.delete(key);
           removed++;
