@@ -108,6 +108,35 @@ describe('SmartRate v4 — Memory Token Bucket Unit & Integration Tests', () => 
       });
       assert.equal(typeof mappedLimiter, 'function');
     });
+
+    it('derives fallback refillRate using the configured refill interval', async () => {
+      const app = createTestApp();
+      let receivedOptions;
+      const store = {
+        async consume(options) {
+          receivedOptions = options;
+          return { allowed: true, remaining: 0, reset: 1, retryAfter: 0 };
+        }
+      };
+
+      app.get(
+        '/api/fallback-refill',
+        rateLimiter({
+          store,
+          algorithm: 'token-bucket',
+          limit: 10,
+          windowMs: 5000,
+          refillIntervalMs: 2000
+        }),
+        (req, res) => res.sendStatus(200)
+      );
+
+      const response = await request(app).get('/api/fallback-refill');
+
+      assert.equal(response.status, 200);
+      assert.equal(receivedOptions.refillRate, 4);
+      assert.equal(receivedOptions.refillIntervalMs, 2000);
+    });
   });
 
   describe('MemoryStore Token Bucket Unit Semantics', () => {

@@ -170,18 +170,18 @@ export function rateLimiter(options = {}) {
         ? await capacity(req)
         : (capacity ?? resolvedLimit);
 
+      const resolvedRefillIntervalMs = typeof refillIntervalMs === 'function'
+        ? await refillIntervalMs(req)
+        : (refillIntervalMs ?? 1000);
+
       let resolvedRefillRate;
       if (typeof refillRate === 'function') {
         resolvedRefillRate = await refillRate(req);
       } else if (refillRate !== undefined) {
         resolvedRefillRate = refillRate;
       } else if (resolvedLimit && resolvedWindowMs) {
-        resolvedRefillRate = resolvedLimit / (resolvedWindowMs / 1000);
+        resolvedRefillRate = resolvedLimit * (resolvedRefillIntervalMs / resolvedWindowMs);
       }
-
-      const resolvedRefillIntervalMs = typeof refillIntervalMs === 'function'
-        ? await refillIntervalMs(req)
-        : (refillIntervalMs ?? 1000);
 
       // 3. Resolve dynamic request cost
       let requestCost = 1;
