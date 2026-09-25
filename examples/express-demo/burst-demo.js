@@ -33,9 +33,9 @@ app.get(
       success: true,
       message: 'Request allowed under Token Bucket burst quota',
       quota: {
-        limit: req.header('ratelimit-limit'),
-        remaining: req.header('ratelimit-remaining'),
-        reset: req.header('ratelimit-reset')
+        limit: res.get('ratelimit-limit'),
+        remaining: res.get('ratelimit-remaining'),
+        reset: res.get('ratelimit-reset')
       },
       timestamp: new Date().toISOString()
     });
@@ -95,9 +95,11 @@ async function makeRequest(path) {
 
 async function runSimulation() {
   console.log(`--- [Stage 1: Firing Rapid Burst of ${BURST_CAPACITY} Requests] ---`);
+  const burstStatuses = [];
 
   for (let i = 1; i <= BURST_CAPACITY; i++) {
     const res = await makeRequest('/api/burst');
+    burstStatuses.push(res.status);
     console.log(
       `  Request #${i}: HTTP ${res.status} | Remaining: ${res.headers['ratelimit-remaining']} | Reset (to full): ${res.headers['ratelimit-reset']}s`
     );
@@ -119,6 +121,17 @@ async function runSimulation() {
   console.log(
     `  Request #${BURST_CAPACITY + 2}: HTTP ${recovered.status} (RECOVERED) | Remaining: ${recovered.headers['ratelimit-remaining']} | Reset (to full): ${recovered.headers['ratelimit-reset']}s`
   );
+
+  const actualStatuses = [...burstStatuses, blocked.status, recovered.status];
+  const expectedStatuses = [...Array(BURST_CAPACITY).fill(200), 429, 200];
+  const failedRequest = actualStatuses.findIndex((status, index) => status !== expectedStatuses[index]);
+  if (failedRequest !== -1) {
+    console.error(
+      `❌ Simulation failed: request #${failedRequest + 1} expected HTTP ${expectedStatuses[failedRequest]}, got HTTP ${actualStatuses[failedRequest]}.`
+    );
+    server.close(() => process.exit(1));
+    return;
+  }
 
   console.log(`\n=============================================================`);
   console.log(`✅ Simulation completed! Server remains active on port ${PORT}.`);
