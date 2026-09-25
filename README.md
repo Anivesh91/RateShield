@@ -61,8 +61,8 @@ SmartRate v5 brings production-grade **Token Bucket and Burst Control** semantic
     $$currentTokens = \min(capacity, tokens + \text{tokensToAdd})$$
 * **Option C `RateLimit-Reset` & HTTP Retry Semantics**:
   - For Token Bucket, `RateLimit-Reset` does not represent a fixed-window boundary.
-  - **On Allowed Responses (`remaining > 0`)**: `RateLimit-Reset` indicates seconds until the bucket reaches full capacity (when full burst capacity is restored).
-  - **On Blocked Responses (`remaining == 0` / HTTP 429)**: `RateLimit-Reset` indicates the next request-eligibility point, matching `Retry-After` ($\lceil (1 - currentTokens) / \text{refillPerMs} / 1000 \rceil$).
+  - **On Allowed Responses (HTTP 2xx)**: `RateLimit-Reset` indicates seconds until the bucket reaches full capacity (when full burst capacity is restored), including when `RateLimit-Remaining` is zero.
+  - **On Blocked Responses (HTTP 429)**: `RateLimit-Reset` indicates the next request-eligibility point, matching `Retry-After` ($\lceil (1 - currentTokens) / \text{refillPerMs} / 1000 \rceil$).
   - Aligns with IETF RateLimit Header specifications where `Retry-After` takes precedence on throttled responses.
 * **Storage Cleanup TTL vs. Continuous Refill**:
   - **`TTL = cleanup only`**: In Redis, sliding key expiration ($2 \times \text{fullRefillTime}$, min 60s) refreshes on every request to prune abandoned keys.
@@ -222,12 +222,18 @@ const TIER_CONFIG = {
 
 app.use(
   '/api',
+  (req, res, next) => {
+    const requestedTier = req.user?.tier;
+    const tier = Object.hasOwn(TIER_CONFIG, requestedTier) ? requestedTier : 'free';
+    req.rateLimitPolicy = TIER_CONFIG[tier];
+    next();
+  },
   rateLimiter({
     algorithm: 'token-bucket',
     keyGenerator: (req) => req.headers['x-api-key'],
-    capacity: (req) => TIER_CONFIG[req.user?.tier || 'free'].capacity,
-    refillRate: (req) => TIER_CONFIG[req.user?.tier || 'free'].refillRate,
-    refillIntervalMs: (req) => TIER_CONFIG[req.user?.tier || 'free'].refillIntervalMs
+    capacity: (req) => req.rateLimitPolicy.capacity,
+    refillRate: (req) => req.rateLimitPolicy.refillRate,
+    refillIntervalMs: (req) => req.rateLimitPolicy.refillIntervalMs
   })
 );
 ```
@@ -279,7 +285,7 @@ npm run demo:multi
 
 ---
 
-## Verification & Test Catalog (109 Tests)
+## Verification & Test Catalog (110 Tests)
 
 Run the full automated test suite:
 
@@ -287,7 +293,7 @@ Run the full automated test suite:
 npm test
 ```
 
-### Test Suites Breakdown (109 Tests across 14 Files)
+### Test Suites Breakdown (110 Tests across 14 Files)
 
 1. **`tests/tokenBucket.recovery.test.js`** (11 tests) — **[v5]**
    - Option C `RateLimit-Reset` semantics in MemoryStore and RedisStore.
@@ -296,7 +302,7 @@ npm test
    - Identity composition: User ID, API Key, Multi-Tenant composite keys, IP fallback.
    - Full HTTP recovery cycle: `200 OK` (burst) $\to$ `429 Too Many Requests` $\to$ wait `Retry-After` $\to$ `200 OK` (recovered).
    - 50-request parallel burst concurrency verification under RedisStore.
-2. **`tests/tokenBucket.memory.test.js`** (15 tests) — **[v4/v5]**
+2. **`tests/tokenBucket.memory.test.js`** (16 tests) — **[v4/v5]**
    - Fail-fast parameter validation for `capacity`, `refillRate`, `refillIntervalMs`.
    - Continuous in-memory refill math and capacity ceiling clamping.
    - Custom `refillIntervalMs` verification (100 tokens per 60,000ms).
