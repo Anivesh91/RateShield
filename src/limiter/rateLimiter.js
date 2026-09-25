@@ -22,7 +22,7 @@ function validateOptions(options) {
     throw new TypeError('SmartRate: Options must be an object.');
   }
 
-  const { limit, windowMs, store, algorithm = 'fixed-window', keyGenerator, capacity, refillRate, cost } = options;
+  const { limit, windowMs, store, algorithm = 'fixed-window', keyGenerator, capacity, refillRate, refillIntervalMs, cost } = options;
 
   if (keyGenerator !== undefined && typeof keyGenerator !== 'function') {
     throw new TypeError("SmartRate: 'keyGenerator' must be a function.");
@@ -67,6 +67,14 @@ function validateOptions(options) {
       if (typeof refillRate !== 'function' && (typeof refillRate !== 'number' || !Number.isFinite(refillRate) || refillRate <= 0)) {
         throw new RangeError(
           `SmartRate: Token Bucket requires a positive number 'refillRate' (or 'limit' and 'windowMs') (received: ${refillRate}).`
+        );
+      }
+    }
+
+    if (refillIntervalMs !== undefined) {
+      if (typeof refillIntervalMs !== 'function' && (typeof refillIntervalMs !== 'number' || !Number.isFinite(refillIntervalMs) || refillIntervalMs <= 0)) {
+        throw new RangeError(
+          `SmartRate: Token Bucket requires a positive number 'refillIntervalMs' (received: ${refillIntervalMs}).`
         );
       }
     }
@@ -121,7 +129,8 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
  * @param {number|Function} [options.windowMs] - Window duration in milliseconds (or dynamic function)
  * @param {'fixed-window'|'sliding-window'|'token-bucket'} [options.algorithm='fixed-window'] - Selected algorithm
  * @param {number|Function} [options.capacity] - Token bucket capacity (or dynamic function)
- * @param {number|Function} [options.refillRate] - Token bucket refill rate in tokens/sec (or dynamic function)
+ * @param {number|Function} [options.refillRate] - Token bucket refill rate (or dynamic function)
+ * @param {number|Function} [options.refillIntervalMs=1000] - Refill interval duration in milliseconds (or dynamic function)
  * @param {number|Function} [options.cost=1] - Request cost in tokens (or dynamic function)
  * @param {Function} [options.keyGenerator] - Custom client identifier extractor
  * @param {Object} [options.store] - Store implementation (defaults to MemoryStore)
@@ -130,7 +139,7 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
 export function rateLimiter(options = {}) {
   validateOptions(options);
 
-  const { limit, windowMs, capacity, refillRate, cost = 1 } = options;
+  const { limit, windowMs, capacity, refillRate, refillIntervalMs = 1000, cost = 1 } = options;
   const algorithm = options.algorithm || 'fixed-window';
   const store = options.store || defaultMemoryStore;
   const keyGenerator = options.keyGenerator || defaultKeyGenerator;
@@ -170,6 +179,10 @@ export function rateLimiter(options = {}) {
         resolvedRefillRate = resolvedLimit / (resolvedWindowMs / 1000);
       }
 
+      const resolvedRefillIntervalMs = typeof refillIntervalMs === 'function'
+        ? await refillIntervalMs(req)
+        : (refillIntervalMs ?? 1000);
+
       // 3. Resolve dynamic request cost
       let requestCost = 1;
       if (typeof cost === 'function') {
@@ -185,6 +198,9 @@ export function rateLimiter(options = {}) {
         }
         if (typeof resolvedRefillRate !== 'number' || !Number.isFinite(resolvedRefillRate) || resolvedRefillRate <= 0) {
           throw new RangeError(`SmartRate: Dynamic 'refillRate' must resolve to a positive number (received: ${resolvedRefillRate}).`);
+        }
+        if (typeof resolvedRefillIntervalMs !== 'number' || !Number.isFinite(resolvedRefillIntervalMs) || resolvedRefillIntervalMs <= 0) {
+          throw new RangeError(`SmartRate: Dynamic 'refillIntervalMs' must resolve to a positive number (received: ${resolvedRefillIntervalMs}).`);
         }
         if (typeof requestCost !== 'number' || !Number.isInteger(requestCost) || requestCost <= 0) {
           throw new RangeError(`SmartRate: Dynamic 'cost' must resolve to a positive integer (received: ${requestCost}).`);
@@ -205,6 +221,7 @@ export function rateLimiter(options = {}) {
         algorithm,
         capacity: resolvedCapacity,
         refillRate: resolvedRefillRate,
+        refillIntervalMs: resolvedRefillIntervalMs,
         cost: requestCost
       });
 
