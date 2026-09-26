@@ -1,4 +1,5 @@
 import { MemoryStore } from '../stores/memoryStore.js';
+import { ResilientStore } from '../stores/resilientStore.js';
 import { buildRateLimitKey } from '../utils/keyBuilder.js';
 import { withTimeout } from '../resilience/timeoutGuard.js';
 import { CircuitBreaker } from '../resilience/circuitBreaker.js';
@@ -40,8 +41,15 @@ function validateOptions(options) {
     circuitBreaker,
     failureThreshold,
     resetTimeoutMs,
-    successThreshold
+    successThreshold,
+    fallbackStore
   } = options;
+
+  if (fallbackStore !== undefined) {
+    if (typeof fallbackStore !== 'boolean' && (typeof fallbackStore !== 'object' || fallbackStore === null || typeof fallbackStore.consume !== 'function')) {
+      throw new TypeError("SmartRate: 'fallbackStore' must be a boolean or an object implementing a consume() method.");
+    }
+  }
 
   if (timeoutMs !== undefined && (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
     throw new RangeError(`SmartRate: 'timeoutMs' must be a positive number in milliseconds (received: ${timeoutMs}).`);
@@ -222,10 +230,11 @@ export function rateLimiter(options = {}) {
     circuitBreaker,
     failureThreshold,
     resetTimeoutMs,
-    successThreshold
+    successThreshold,
+    fallbackStore
   } = options;
   const algorithm = options.algorithm || 'fixed-window';
-  const store = options.store || defaultMemoryStore;
+  let store = options.store || defaultMemoryStore;
   const keyGenerator = options.keyGenerator || defaultKeyGenerator;
 
   let breaker = null;
@@ -238,6 +247,22 @@ export function rateLimiter(options = {}) {
   } else if (failureThreshold !== undefined || resetTimeoutMs !== undefined || successThreshold !== undefined) {
     breaker = new CircuitBreaker({ failureThreshold, resetTimeoutMs, successThreshold });
   }
+
+  if (fallbackStore) {
+    if (!(store instanceof ResilientStore)) {
+      store = new ResilientStore({
+        primaryStore: store,
+        fallbackStore: fallbackStore === true ? undefined : fallbackStore,
+        circuitBreaker: breaker || undefined,
+        timeoutMs
+      });
+      breaker = store.circuitBreaker;
+    }
+  } else if (store instanceof ResilientStore && breaker === null) {
+    breaker = store.circuitBreaker;
+  }
+
+  const isResilient = store instanceof ResilientStore;
 
   const rateLimiterMiddleware = async function rateLimiterMiddleware(req, res, next) {
     try {
@@ -313,19 +338,19 @@ export function rateLimiter(options = {}) {
       try {
         const consumeOp = () => {
           const storeOperation = store.consume({
-              key,
-              limit: resolvedLimit,
-              windowMs: resolvedWindowMs,
-              algorithm,
-              capacity: resolvedCapacity,
-              refillRate: resolvedRefillRate,
-              refillIntervalMs: resolvedRefillIntervalMs,
-              cost: requestCost
-            });
-          return timeoutMs === undefined ? storeOperation : withTimeout(storeOperation, timeoutMs);
+            key,
+            limit: resolvedLimit,
+            windowMs: resolvedWindowMs,
+            algorithm,
+            capacity: resolvedCapacity,
+            refillRate: resolvedRefillRate,
+            refillIntervalMs: resolvedRefillIntervalMs,
+            cost: requestCost
+          });
+          return (timeoutMs === undefined || isResilient) ? storeOperation : withTimeout(storeOperation, timeoutMs);
         };
 
-        result = breaker ? await breaker.execute(consumeOp) : await consumeOp();
+        result = (breaker && !isResilient) ? await breaker.execute(consumeOp) : await consumeOp();
       } catch (storeError) {
         if (typeof res.setHeader === 'function' && !res.headersSent) {
           res.setHeader('RateLimit-Degraded', 'true');
@@ -365,6 +390,19 @@ export function rateLimiter(options = {}) {
         }
 
         return next(storeError);
+      }
+
+      if (result.degraded) {
+        if (typeof res.setHeader === 'function' && !res.headersSent) {
+          res.setHeader('RateLimit-Degraded', 'true');
+        }
+
+        req.rateLimit = {
+          degraded: true,
+          fallbackUsed: Boolean(result.fallbackUsed),
+          store: result.store,
+          primaryError: result.primaryError
+        };
       }
 
       const headerLimit = algorithm === 'token-bucket' ? resolvedCapacity : resolvedLimit;
