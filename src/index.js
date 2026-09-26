@@ -28,3 +28,4 @@ export {
   formatLabels
 } from './telemetry/prometheusExporter.js';
 export { OpenTelemetryBridge } from './telemetry/openTelemetryBridge.js';
+export { runBenchmark, calculatePercentiles } from './benchmark/benchmarkRunner.js';

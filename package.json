@@ -13,6 +13,8 @@
     "demo:saas": "node examples/express-demo/saas-demo.js",
     "demo:burst": "node examples/express-demo/burst-demo.js",
     "demo:resilience": "node examples/express-demo/resilience-demo.js",
+    "demo:observability": "node examples/express-demo/observability-demo.js",
+    "benchmark": "node scripts/benchmark.js",
     "test": "node --test"
   },
   "keywords": [
