@@ -20,6 +20,8 @@ import { withTimeout } from '../resilience/timeoutGuard.js';
  * CRITICAL V6 BOUNDARY:
  * Local memory quotas are NOT backfilled or synchronized into Redis upon recovery.
  * In a multi-instance cluster, in-memory quotas apply per-process during degraded failover.
+ * Timed-out primary consume operations are not cancelled and may complete after fallback
+ * consumption, potentially counting the same request twice; stores currently have no cancellation path.
  */
 export class ResilientStore extends EventEmitter {
   /**

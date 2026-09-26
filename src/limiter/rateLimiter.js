@@ -248,17 +248,23 @@ export function rateLimiter(options = {}) {
     breaker = new CircuitBreaker({ failureThreshold, resetTimeoutMs, successThreshold });
   }
 
-  if (fallbackStore) {
-    if (!(store instanceof ResilientStore)) {
-      store = new ResilientStore({
-        primaryStore: store,
-        fallbackStore: fallbackStore === true ? undefined : fallbackStore,
-        circuitBreaker: breaker || undefined,
-        timeoutMs
-      });
-      breaker = store.circuitBreaker;
+  if (store instanceof ResilientStore) {
+    const hasBreakerOptions =
+      circuitBreaker !== undefined ||
+      failureThreshold !== undefined ||
+      resetTimeoutMs !== undefined ||
+      successThreshold !== undefined;
+    if (hasBreakerOptions && breaker !== store.circuitBreaker) {
+      throw new TypeError("SmartRate: Configure the circuit breaker on the ResilientStore when using it as the store.");
     }
-  } else if (store instanceof ResilientStore && breaker === null) {
+    breaker = store.circuitBreaker;
+  } else if (fallbackStore) {
+    store = new ResilientStore({
+      primaryStore: store,
+      fallbackStore: fallbackStore === true ? undefined : fallbackStore,
+      circuitBreaker: breaker || undefined,
+      timeoutMs
+    });
     breaker = store.circuitBreaker;
   }
 
@@ -397,11 +403,15 @@ export function rateLimiter(options = {}) {
           res.setHeader('RateLimit-Degraded', 'true');
         }
 
+        const primaryErrorName = typeof result.primaryError?.name === 'string' && result.primaryError.name
+          ? result.primaryError.name
+          : 'Error';
+
         req.rateLimit = {
           degraded: true,
           fallbackUsed: Boolean(result.fallbackUsed),
           store: result.store,
-          primaryError: result.primaryError
+          primaryError: primaryErrorName
         };
       }
 

@@ -514,6 +514,27 @@ describe('SmartRate v6 — Day 3: Dual-Store Fallback & ResilientStore Engine', 
   });
 
   describe('8. Express Integration & Header Tagging', () => {
+    it('uses the ResilientStore breaker and rejects conflicting middleware breaker options', () => {
+      const resilientStore = new ResilientStore({ primaryStore: { consume: async () => ({ allowed: true }) } });
+      const limiter = rateLimiter({ store: resilientStore, limit: 5, windowMs: 60000 });
+
+      assert.equal(limiter.circuitBreaker, resilientStore.circuitBreaker);
+      assert.throws(
+        () => rateLimiter({ store: resilientStore, limit: 5, windowMs: 60000, circuitBreaker: true }),
+        { name: 'TypeError' }
+      );
+      assert.doesNotThrow(() => rateLimiter({
+        store: resilientStore,
+        limit: 5,
+        windowMs: 60000,
+        circuitBreaker: resilientStore.circuitBreaker
+      }));
+      assert.throws(
+        () => rateLimiter({ store: resilientStore, limit: 5, windowMs: 60000, failureThreshold: 2 }),
+        { name: 'TypeError' }
+      );
+    });
+
     it('sets RateLimit-Degraded: true and attaches req.rateLimit metadata during outage', async () => {
       let redisHealthy = true;
 
@@ -565,7 +586,7 @@ describe('SmartRate v6 — Day 3: Dual-Store Fallback & ResilientStore Engine', 
       assert.equal(capturedRateLimitMeta.degraded, true);
       assert.equal(capturedRateLimitMeta.fallbackUsed, true);
       assert.equal(capturedRateLimitMeta.store, 'fallback');
-      assert.ok(capturedRateLimitMeta.primaryError instanceof Error);
+      assert.equal(capturedRateLimitMeta.primaryError, 'Error');
 
       // 3. Fallback quota enforcement in Express (limit: 5)
       // Consume the remaining 4 tokens on fallback MemoryStore
