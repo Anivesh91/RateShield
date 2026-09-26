@@ -6,6 +6,7 @@ import { CircuitBreaker } from '../resilience/circuitBreaker.js';
 import { CircuitBreakerOpenError, StoreTimeoutError } from '../resilience/errors.js';
 import { normalizeRoute } from '../utils/routeNormalizer.js';
 import { MetricsCollector, defaultMetricsCollector } from '../telemetry/metricsCollector.js';
+import { OpenTelemetryBridge } from '../telemetry/openTelemetryBridge.js';
 
 const defaultMemoryStore = new MemoryStore();
 
@@ -47,8 +48,18 @@ function validateOptions(options) {
     fallbackStore,
     metrics,
     metricsCollector,
-    routeNormalizer
+    routeNormalizer,
+    openTelemetry
   } = options;
+
+  if (openTelemetry !== undefined) {
+    if (
+      typeof openTelemetry !== 'boolean' &&
+      (typeof openTelemetry !== 'object' || openTelemetry === null)
+    ) {
+      throw new TypeError("SmartRate: 'openTelemetry' must be a boolean, an options object, or an OpenTelemetryBridge instance.");
+    }
+  }
 
   if (metrics !== undefined && typeof metrics !== 'boolean') {
     throw new TypeError("SmartRate: 'metrics' must be a boolean.");
@@ -251,13 +262,23 @@ export function rateLimiter(options = {}) {
     fallbackStore,
     metrics,
     metricsCollector,
-    routeNormalizer
+    routeNormalizer,
+    openTelemetry
   } = options;
   const algorithm = options.algorithm || 'fixed-window';
   let store = options.store || defaultMemoryStore;
   const keyGenerator = options.keyGenerator || defaultKeyGenerator;
 
   const collector = metricsCollector || (metrics ? defaultMetricsCollector : null);
+
+  let otelBridge = null;
+  if (openTelemetry instanceof OpenTelemetryBridge) {
+    otelBridge = openTelemetry;
+  } else if (typeof openTelemetry === 'object' && openTelemetry !== null) {
+    otelBridge = typeof openTelemetry.recordEvaluation === 'function' ? openTelemetry : new OpenTelemetryBridge(openTelemetry);
+  } else if (openTelemetry === true) {
+    otelBridge = new OpenTelemetryBridge();
+  }
 
   let breaker = null;
   if (circuitBreaker instanceof CircuitBreaker) {
@@ -320,7 +341,7 @@ export function rateLimiter(options = {}) {
 
       const method = (req.method || 'GET').toUpperCase();
       const routeKey = getRouteIdentifier(req);
-      const normalizedRoute = collector ? normalizeRoute(req, routeNormalizer) : '/';
+      const normalizedRoute = (collector || otelBridge) ? normalizeRoute(req, routeNormalizer) : '/';
       const defaultStoreLabel = isResilient ? 'resilient' : (store instanceof MemoryStore ? 'memory' : 'redis');
 
       const key = buildRateLimitKey({
@@ -458,6 +479,26 @@ export function rateLimiter(options = {}) {
           });
         }
 
+        if (otelBridge) {
+          safeTelemetry(() => {
+            otelBridge.recordStoreError({ req, storeError, store: defaultStoreLabel });
+            if (onStoreError === 'fail-open' || onStoreError === 'fail-closed') {
+              otelBridge.recordEvaluation({
+                req,
+                result: {
+                  allowed: onStoreError === 'fail-open',
+                  remaining: 0,
+                  reset: 30,
+                  retryAfter: 30
+                },
+                algorithm,
+                normalizedRoute,
+                store: defaultStoreLabel
+              });
+            }
+          });
+        }
+
         if (onStoreError === 'fail-open') {
           return next();
         }
@@ -519,6 +560,19 @@ export function rateLimiter(options = {}) {
             algorithm,
             method,
             normalized_route: normalizedRoute,
+            store: activeStore
+          });
+        });
+      }
+
+      if (otelBridge) {
+        safeTelemetry(() => {
+          const activeStore = result.store || (result.fallbackUsed ? 'fallback' : defaultStoreLabel);
+          otelBridge.recordEvaluation({
+            req,
+            result,
+            algorithm,
+            normalizedRoute,
             store: activeStore
           });
         });

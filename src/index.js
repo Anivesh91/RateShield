@@ -27,3 +27,4 @@ export {
   escapeHelpString,
   formatLabels
 } from './telemetry/prometheusExporter.js';
+export { OpenTelemetryBridge } from './telemetry/openTelemetryBridge.js';

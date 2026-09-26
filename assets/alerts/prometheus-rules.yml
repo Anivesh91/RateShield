@@ -1,0 +1,51 @@
+groups:
+  - name: smartrate.rules
+    rules:
+      - alert: SmartRateHighBlockRate
+        expr: >-
+          (sum by (normalized_route) (rate(smartrate_requests_total{outcome="blocked"}[5m]))
+          /
+          sum by (normalized_route) (rate(smartrate_requests_total[5m])) * 100) > 25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High rate limit block rate on {{ $labels.normalized_route }}"
+          description: "Over 25% of incoming requests are being throttled (429) on {{ $labels.normalized_route }} for 5 minutes."
+
+      - alert: SmartRateStoreOutage
+        expr: sum by (store) (rate(smartrate_store_errors_total[2m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rate limiter store outage detected in {{ $labels.store }}"
+          description: "SmartRate backend store '{{ $labels.store }}' has encountered continuous store errors or timeouts for over 2 minutes."
+
+      - alert: SmartRateCircuitBreakerOpen
+        expr: smartrate_circuit_breaker_state == 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SmartRate Circuit Breaker is OPEN"
+          description: "The rate limiter circuit breaker is OPEN due to repeated storage failures. Traffic is operating in fallback/degraded mode."
+
+      - alert: SmartRateElevatedStoreLatency
+        expr: >-
+          histogram_quantile(0.95, sum by (le, store) (rate(smartrate_store_duration_seconds_bucket[5m]))) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated rate limiter store latency in {{ $labels.store }}"
+          description: "95th percentile latency for rate limit store '{{ $labels.store }}' exceeds 50ms for 5 minutes."
+
+      - alert: SmartRateHighDegradedTraffic
+        expr: sum by (reason) (rate(smartrate_degraded_requests_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SmartRate is processing degraded traffic"
+          description: "Traffic is being processed under degraded or fallback conditions due to '{{ $labels.reason }}'."
