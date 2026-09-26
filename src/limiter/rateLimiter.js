@@ -3,7 +3,9 @@ import { ResilientStore } from '../stores/resilientStore.js';
 import { buildRateLimitKey } from '../utils/keyBuilder.js';
 import { withTimeout } from '../resilience/timeoutGuard.js';
 import { CircuitBreaker } from '../resilience/circuitBreaker.js';
-import { CircuitBreakerOpenError } from '../resilience/errors.js';
+import { CircuitBreakerOpenError, StoreTimeoutError } from '../resilience/errors.js';
+import { normalizeRoute } from '../utils/routeNormalizer.js';
+import { MetricsCollector, defaultMetricsCollector } from '../telemetry/metricsCollector.js';
 
 const defaultMemoryStore = new MemoryStore();
 
@@ -42,8 +44,23 @@ function validateOptions(options) {
     failureThreshold,
     resetTimeoutMs,
     successThreshold,
-    fallbackStore
+    fallbackStore,
+    metrics,
+    metricsCollector,
+    routeNormalizer
   } = options;
+
+  if (metrics !== undefined && typeof metrics !== 'boolean') {
+    throw new TypeError("SmartRate: 'metrics' must be a boolean.");
+  }
+
+  if (metricsCollector !== undefined && (typeof metricsCollector !== 'object' || metricsCollector === null || typeof metricsCollector.recordRequest !== 'function')) {
+    throw new TypeError("SmartRate: 'metricsCollector' must be an object implementing a recordRequest() method.");
+  }
+
+  if (routeNormalizer !== undefined && typeof routeNormalizer !== 'function') {
+    throw new TypeError("SmartRate: 'routeNormalizer' must be a function.");
+  }
 
   if (fallbackStore !== undefined) {
     if (typeof fallbackStore !== 'boolean' && (typeof fallbackStore !== 'object' || fallbackStore === null || typeof fallbackStore.consume !== 'function')) {
@@ -231,11 +248,16 @@ export function rateLimiter(options = {}) {
     failureThreshold,
     resetTimeoutMs,
     successThreshold,
-    fallbackStore
+    fallbackStore,
+    metrics,
+    metricsCollector,
+    routeNormalizer
   } = options;
   const algorithm = options.algorithm || 'fixed-window';
   let store = options.store || defaultMemoryStore;
   const keyGenerator = options.keyGenerator || defaultKeyGenerator;
+
+  const collector = metricsCollector || (metrics ? defaultMetricsCollector : null);
 
   let breaker = null;
   if (circuitBreaker instanceof CircuitBreaker) {
@@ -268,7 +290,26 @@ export function rateLimiter(options = {}) {
     breaker = store.circuitBreaker;
   }
 
+  if (collector && breaker) {
+    collector.recordCircuitBreakerState(breaker.getState());
+    breaker.on('stateChange', (evt) => {
+      try {
+        collector.recordCircuitBreakerState(evt.to);
+      } catch {
+        // Safe telemetry
+      }
+    });
+  }
+
   const isResilient = store instanceof ResilientStore;
+
+  const safeTelemetry = (fn) => {
+    try {
+      fn();
+    } catch {
+      // Telemetry failure must never disrupt request processing
+    }
+  };
 
   const rateLimiterMiddleware = async function rateLimiterMiddleware(req, res, next) {
     try {
@@ -279,6 +320,8 @@ export function rateLimiter(options = {}) {
 
       const method = (req.method || 'GET').toUpperCase();
       const routeKey = getRouteIdentifier(req);
+      const normalizedRoute = collector ? normalizeRoute(req, routeNormalizer) : '/';
+      const defaultStoreLabel = isResilient ? 'resilient' : (store instanceof MemoryStore ? 'memory' : 'redis');
 
       const key = buildRateLimitKey({
         algorithm,
@@ -341,6 +384,11 @@ export function rateLimiter(options = {}) {
       }
 
       let result;
+      let storeStart = 0;
+      if (collector) {
+        storeStart = process.hrtime.bigint();
+      }
+
       try {
         const consumeOp = () => {
           const storeOperation = store.consume({
@@ -357,7 +405,18 @@ export function rateLimiter(options = {}) {
         };
 
         result = (breaker && !isResilient) ? await breaker.execute(consumeOp) : await consumeOp();
+
+        if (collector && storeStart > 0) {
+          const durationSec = Number(process.hrtime.bigint() - storeStart) / 1e9;
+          const activeStore = result.store || (result.fallbackUsed ? 'fallback' : defaultStoreLabel);
+          safeTelemetry(() => collector.recordStoreDuration(durationSec, { store: activeStore }));
+        }
       } catch (storeError) {
+        if (collector && storeStart > 0) {
+          const durationSec = Number(process.hrtime.bigint() - storeStart) / 1e9;
+          safeTelemetry(() => collector.recordStoreDuration(durationSec, { store: defaultStoreLabel }));
+        }
+
         if (typeof res.setHeader === 'function' && !res.headersSent) {
           res.setHeader('RateLimit-Degraded', 'true');
         }
@@ -366,6 +425,38 @@ export function rateLimiter(options = {}) {
           degraded: true,
           storeError
         };
+
+        if (collector) {
+          safeTelemetry(() => {
+            const errorType =
+              storeError instanceof StoreTimeoutError
+                ? 'timeout'
+                : storeError instanceof CircuitBreakerOpenError
+                  ? 'circuit_open'
+                  : (storeError?.code === 'ECONNREFUSED' ? 'econnrefused' : 'store_error');
+
+            collector.recordStoreError({ store: defaultStoreLabel, error_type: errorType });
+            collector.recordDegradedRequest({ reason: errorType });
+
+            if (onStoreError === 'fail-open') {
+              collector.recordRequest({
+                outcome: 'allowed',
+                algorithm,
+                method,
+                normalized_route: normalizedRoute,
+                store: defaultStoreLabel
+              });
+            } else if (onStoreError === 'fail-closed') {
+              collector.recordRequest({
+                outcome: 'blocked',
+                algorithm,
+                method,
+                normalized_route: normalizedRoute,
+                store: defaultStoreLabel
+              });
+            }
+          });
+        }
 
         if (onStoreError === 'fail-open') {
           return next();
@@ -415,6 +506,24 @@ export function rateLimiter(options = {}) {
         };
       }
 
+      if (collector) {
+        safeTelemetry(() => {
+          if (result.degraded) {
+            collector.recordDegradedRequest({
+              reason: result.primaryError?.name || 'fallback'
+            });
+          }
+          const activeStore = result.store || (result.fallbackUsed ? 'fallback' : defaultStoreLabel);
+          collector.recordRequest({
+            outcome: result.allowed ? 'allowed' : 'blocked',
+            algorithm,
+            method,
+            normalized_route: normalizedRoute,
+            store: activeStore
+          });
+        });
+      }
+
       const headerLimit = algorithm === 'token-bucket' ? resolvedCapacity : resolvedLimit;
 
       setRateLimitHeaders(res, {
@@ -439,6 +548,7 @@ export function rateLimiter(options = {}) {
   };
 
   rateLimiterMiddleware.circuitBreaker = breaker;
+  rateLimiterMiddleware.metricsCollector = collector;
   return rateLimiterMiddleware;
 }
 
