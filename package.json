@@ -1,7 +1,7 @@
 {
   "name": "smart-rate",
-  "version": "6.0.0",
-  "description": "Production-ready distributed rate limiting middleware for Express.js supporting Production Resilience, Circuit Breakers, Dual-Store Fallback, Token Bucket + Burst Control, Rolling Sliding Window, and Fixed Window algorithms with custom identity and dynamic policies",
+  "version": "7.0.0",
+  "description": "Production-ready distributed rate limiting middleware for Express.js supporting Observability (Prometheus, Grafana, OpenTelemetry), High-Precision Benchmarks, Production Resilience, Circuit Breakers, Dual-Store Fallback, Token Bucket + Burst Control, Rolling Sliding Window, and Fixed Window algorithms with custom identity and dynamic policies",
   "type": "module",
   "main": "./src/index.js",
   "exports": "./src/index.js",
@@ -13,6 +13,8 @@
     "demo:saas": "node examples/express-demo/saas-demo.js",
     "demo:burst": "node examples/express-demo/burst-demo.js",
     "demo:resilience": "node examples/express-demo/resilience-demo.js",
+    "demo:observability": "node examples/express-demo/observability-demo.js",
+    "benchmark": "node scripts/benchmark.js",
     "test": "node --test"
   },
   "keywords": [
