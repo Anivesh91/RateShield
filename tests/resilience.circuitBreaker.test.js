@@ -313,7 +313,7 @@ describe('SmartRate v6 — Day 2: Store Circuit Breaker Engine', () => {
       const r3 = await request(app).get('/fail-closed-circuit');
       assert.equal(r3.status, 503);
       assert.equal(r3.headers['ratelimit-degraded'], 'true');
-      assert.equal(r3.headers['retry-after'], '30');
+      assert.equal(r3.headers['retry-after'], '5');
       assert.equal(storeConsumeCalls, 2); // Still 2! Not touched
     });
 
@@ -406,6 +406,95 @@ describe('SmartRate v6 — Day 2: Store Circuit Breaker Engine', () => {
       assert.equal(resB.status, 200);
       assert.equal(resB.headers['ratelimit-degraded'], 'true');
       assert.equal(brokenConsumeCount, 2); // Unchanged!
+    });
+  });
+
+  describe('5. Precise Failure Classification & Dependency Isolation', () => {
+    it('does NOT count rate-limit 429 quota exhaustion as a breaker failure', async () => {
+      const app = express();
+      const limiter = rateLimiter({
+        limit: 2,
+        windowMs: 60_000,
+        circuitBreaker: { failureThreshold: 2 }
+      });
+
+      app.get('/quota-test', limiter, (req, res) => res.json({ allowed: true }));
+
+      // Request 1: 200
+      const r1 = await request(app).get('/quota-test');
+      assert.equal(r1.status, 200);
+      assert.equal(limiter.circuitBreaker.getStats().consecutiveFailures, 0);
+
+      // Request 2: 200
+      const r2 = await request(app).get('/quota-test');
+      assert.equal(r2.status, 200);
+      assert.equal(limiter.circuitBreaker.getStats().consecutiveFailures, 0);
+
+      // Request 3: 429 Too Many Requests
+      const r3 = await request(app).get('/quota-test');
+      assert.equal(r3.status, 429);
+      // Quota exhaustion is expected rate-limiting behavior, NOT a store/infra failure!
+      assert.equal(limiter.circuitBreaker.getStats().consecutiveFailures, 0);
+      assert.equal(limiter.circuitBreaker.isClosed(), true);
+
+      // Request 4: 429 Too Many Requests
+      const r4 = await request(app).get('/quota-test');
+      assert.equal(r4.status, 429);
+      assert.equal(limiter.circuitBreaker.getStats().consecutiveFailures, 0);
+      assert.equal(limiter.circuitBreaker.isClosed(), true);
+    });
+
+    it('does NOT count keyGenerator errors as breaker failures', async () => {
+      const app = express();
+      const failingKeyGen = () => { throw new Error('Auth token decoding crashed'); };
+      const limiter = rateLimiter({
+        limit: 5,
+        windowMs: 60_000,
+        keyGenerator: failingKeyGen,
+        circuitBreaker: { failureThreshold: 2 }
+      });
+
+      app.get('/bad-keygen', limiter, (req, res) => res.json({ ok: true }));
+      app.use((err, req, res, next) => res.status(500).json({ error: err.message }));
+
+      // Multiple keygen crashes should bubble to next(err), but breaker must NOT trip
+      await request(app).get('/bad-keygen');
+      await request(app).get('/bad-keygen');
+      await request(app).get('/bad-keygen');
+
+      assert.equal(limiter.circuitBreaker.getStats().consecutiveFailures, 0);
+      assert.equal(limiter.circuitBreaker.isClosed(), true);
+    });
+
+    it('does NOT count dynamic policy evaluation errors as breaker failures', async () => {
+      const app = express();
+      const failingDynamicLimit = () => { throw new Error('Dynamic policy DB error'); };
+      const limiter = rateLimiter({
+        limit: failingDynamicLimit,
+        windowMs: 60_000,
+        circuitBreaker: { failureThreshold: 2 }
+      });
+
+      app.get('/bad-dynamic', limiter, (req, res) => res.json({ ok: true }));
+      app.use((err, req, res, next) => res.status(500).json({ error: err.message }));
+
+      await request(app).get('/bad-dynamic');
+      await request(app).get('/bad-dynamic');
+
+      assert.equal(limiter.circuitBreaker.getStats().consecutiveFailures, 0);
+      assert.equal(limiter.circuitBreaker.isClosed(), true);
+    });
+
+    it('supports custom isFailure predicate to filter counted errors', async () => {
+      const cb = new CircuitBreaker({
+        failureThreshold: 2,
+        isFailure: (err) => err.name === 'StoreTimeoutError' // Only timeouts count as failures
+      });
+
+      // Regular application error does not count
+      await assert.rejects(async () => cb.execute(() => Promise.reject(new Error('User logic error'))));
+      assert.equal(cb.getStats().consecutiveFailures, 0);
+      assert.equal(cb.isClosed(), true);
     });
   });
 });

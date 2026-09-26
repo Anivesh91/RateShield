@@ -2,6 +2,7 @@ import { MemoryStore } from '../stores/memoryStore.js';
 import { buildRateLimitKey } from '../utils/keyBuilder.js';
 import { withTimeout } from '../resilience/timeoutGuard.js';
 import { CircuitBreaker } from '../resilience/circuitBreaker.js';
+import { CircuitBreakerOpenError } from '../resilience/errors.js';
 
 const defaultMemoryStore = new MemoryStore();
 
@@ -196,7 +197,7 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
  * @param {number|Function} [options.refillRate] - Token bucket refill rate (or dynamic function)
  * @param {number|Function} [options.refillIntervalMs=1000] - Refill interval duration in milliseconds (or dynamic function)
  * @param {number|Function} [options.cost=1] - Request cost in tokens (or dynamic function)
- * @param {number} [options.timeoutMs=250] - Store operation timeout in milliseconds
+ * @param {number} [options.timeoutMs] - Optional store operation timeout in milliseconds
  * @param {'fail-open'|'fail-closed'|'error'|Function} [options.onStoreError] - Policy when store errors or times out
  * @param {boolean|Object|CircuitBreaker} [options.circuitBreaker] - Circuit breaker configuration or instance
  * @param {number} [options.failureThreshold=5] - Consecutive failures before opening circuit
@@ -216,7 +217,7 @@ export function rateLimiter(options = {}) {
     refillRate,
     refillIntervalMs = 1000,
     cost = 1,
-    timeoutMs = 250,
+    timeoutMs,
     onStoreError,
     circuitBreaker,
     failureThreshold,
@@ -310,9 +311,8 @@ export function rateLimiter(options = {}) {
 
       let result;
       try {
-        const consumeOp = () =>
-          withTimeout(
-            store.consume({
+        const consumeOp = () => {
+          const storeOperation = store.consume({
               key,
               limit: resolvedLimit,
               windowMs: resolvedWindowMs,
@@ -321,9 +321,9 @@ export function rateLimiter(options = {}) {
               refillRate: resolvedRefillRate,
               refillIntervalMs: resolvedRefillIntervalMs,
               cost: requestCost
-            }),
-            timeoutMs
-          );
+            });
+          return timeoutMs === undefined ? storeOperation : withTimeout(storeOperation, timeoutMs);
+        };
 
         result = breaker ? await breaker.execute(consumeOp) : await consumeOp();
       } catch (storeError) {
@@ -341,8 +341,17 @@ export function rateLimiter(options = {}) {
         }
 
         if (onStoreError === 'fail-closed') {
+          let retryAfterSeconds = 30;
+
+          if (storeError instanceof CircuitBreakerOpenError && typeof storeError.resetTimeoutMs === 'number') {
+            retryAfterSeconds = Math.max(1, Math.ceil(storeError.resetTimeoutMs / 1000));
+          } else if (breaker && breaker.isOpen()) {
+            const remainingMs = Math.max(0, breaker.nextAttempt - Date.now());
+            retryAfterSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+          }
+
           if (typeof res.setHeader === 'function' && !res.headersSent) {
-            res.setHeader('Retry-After', '30');
+            res.setHeader('Retry-After', String(retryAfterSeconds));
           }
           return res.status(503).json({
             success: false,

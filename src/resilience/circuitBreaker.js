@@ -17,8 +17,9 @@ export const CIRCUIT_STATE = Object.freeze({
  * to prevent hammering unhealthy or timing out rate-limiting stores (e.g. Redis).
  *
  * Transitions:
+ * Transitions:
  * - CLOSED    -> OPEN: When consecutive store failures exceed failureThreshold.
- * - OPEN      -> HALF_OPEN: When resetTimeoutMs has elapsed.
+ * - OPEN      -> HALF_OPEN: Lazy on-demand transition evaluated when next request arrives after resetTimeoutMs has elapsed.
  * - HALF_OPEN -> CLOSED: When a single-flight canary probe succeeds.
  * - HALF_OPEN -> OPEN: When a canary probe fails.
  */
@@ -28,6 +29,7 @@ export class CircuitBreaker extends EventEmitter {
    * @param {number} [options.failureThreshold=5] - Consecutive failures before opening the circuit
    * @param {number} [options.resetTimeoutMs=10000] - Duration in ms before transitioning from OPEN to HALF_OPEN
    * @param {number} [options.successThreshold=1] - Consecutive successful probes in HALF_OPEN to close the circuit
+   * @param {(err: Error) => boolean} [options.isFailure] - Optional predicate to classify if an error counts towards circuit trip
    */
   constructor(options = {}) {
     super();
@@ -35,7 +37,8 @@ export class CircuitBreaker extends EventEmitter {
     const {
       failureThreshold = 5,
       resetTimeoutMs = 10000,
-      successThreshold = 1
+      successThreshold = 1,
+      isFailure = () => true
     } = options;
 
     if (typeof failureThreshold !== 'number' || !Number.isInteger(failureThreshold) || failureThreshold <= 0) {
@@ -56,9 +59,14 @@ export class CircuitBreaker extends EventEmitter {
       );
     }
 
+    if (typeof isFailure !== 'function') {
+      throw new TypeError("SmartRate: CircuitBreaker 'isFailure' must be a function.");
+    }
+
     this.failureThreshold = failureThreshold;
     this.resetTimeoutMs = resetTimeoutMs;
     this.successThreshold = successThreshold;
+    this.isFailure = isFailure;
 
     this.state = CIRCUIT_STATE.CLOSED;
     this.consecutiveFailures = 0;
@@ -190,7 +198,9 @@ export class CircuitBreaker extends EventEmitter {
       this._recordSuccess();
       return result;
     } catch (err) {
-      this._recordFailure(err);
+      if (this.isFailure(err)) {
+        this._recordFailure(err);
+      }
       throw err;
     } finally {
       if (this.state === CIRCUIT_STATE.HALF_OPEN) {
