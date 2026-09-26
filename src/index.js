@@ -15,7 +15,15 @@ export { MetricsCollector, defaultMetricsCollector } from './telemetry/metricsCo
 export {
   METRIC_NAMES,
   METRIC_TYPE,
+  METRIC_METADATA,
   CIRCUIT_STATE_GAUGE_VALUES,
   DEFAULT_STORE_DURATION_BUCKETS
 } from './telemetry/telemetryEvents.js';
 export { normalizeRoute, sanitizePath } from './utils/routeNormalizer.js';
+export {
+  createPrometheusExporter,
+  formatPrometheusMetrics,
+  escapeLabelValue,
+  escapeHelpString,
+  formatLabels
+} from './telemetry/prometheusExporter.js';

@@ -42,3 +42,26 @@ export const DEFAULT_STORE_DURATION_BUCKETS = Object.freeze([
   0.5,
   1.0
 ]);
+
+export const METRIC_METADATA = Object.freeze({
+  [METRIC_NAMES.REQUESTS_TOTAL]: {
+    type: METRIC_TYPE.COUNTER,
+    help: 'Total number of rate limiter requests evaluated.'
+  },
+  [METRIC_NAMES.STORE_ERRORS_TOTAL]: {
+    type: METRIC_TYPE.COUNTER,
+    help: 'Total number of store or timeout errors encountered.'
+  },
+  [METRIC_NAMES.DEGRADED_REQUESTS_TOTAL]: {
+    type: METRIC_TYPE.COUNTER,
+    help: 'Total number of requests handled under degraded or fallback conditions.'
+  },
+  [METRIC_NAMES.CIRCUIT_BREAKER_STATE]: {
+    type: METRIC_TYPE.GAUGE,
+    help: 'Current state of the rate limiter circuit breaker (0=CLOSED, 1=HALF_OPEN, 2=OPEN).'
+  },
+  [METRIC_NAMES.STORE_DURATION_SECONDS]: {
+    type: METRIC_TYPE.HISTOGRAM,
+    help: 'Duration of rate limiter store operations in seconds.'
+  }
+});
