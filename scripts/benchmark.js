@@ -37,7 +37,7 @@ async function main() {
   console.log('REALISTIC OVERHEAD ANALYSIS & FINDINGS');
   console.log('--------------------------------------------------------------------------------');
   console.log(`• Total benchmark execution time: ${totalDuration}s`);
-  console.log(`• Baseline Express middleware p50 latency: ${report.scenarios[0].stats.p50Us} µs`);
+  console.log(`• No-op middleware baseline p50 latency: ${report.scenarios[0].stats.p50Us} µs`);
   console.log(
     `• Fixed Window added latency:             +${report.scenarios[1].overheadP50Us} µs (${(report.scenarios[1].overheadP50Us / 1000).toFixed(4)} ms)`
   );
@@ -51,9 +51,9 @@ async function main() {
     `• Metrics Collection added latency:       +${(report.scenarios[4].stats.p50Us - report.scenarios[2].stats.p50Us).toFixed(2)} µs over Sliding Window`
   );
   console.log(
-    `• OpenTelemetry Bridge added latency:     +${(report.scenarios[5].stats.p50Us - report.scenarios[4].stats.p50Us).toFixed(2)} µs over Metrics`
+    `• Metrics + OTel mock-span scenario p50:  ${report.scenarios[5].stats.p50Us} µs`
   );
-  console.log('\nTakeaway: SmartRate delivers sub-millisecond evaluation latency (< 0.05ms) in-memory.');
+  console.log('\nTakeaway: The per-scenario latency and throughput above are the measured results for this run; performance varies with runtime and workload.');
   console.log('We measure and report real microseconds instead of making false "zero overhead" claims.\n');
 }
 

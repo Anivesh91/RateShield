@@ -52,7 +52,7 @@ export function normalizeRoute(req, customNormalizer) {
     try {
       const custom = customNormalizer(req);
       if (typeof custom === 'string' && custom.length > 0) {
-        return custom;
+        return sanitizePath(custom);
       }
     } catch {
       // Fall through on custom normalizer error to maintain cardinality guard

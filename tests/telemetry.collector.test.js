@@ -14,6 +14,7 @@ import {
   sanitizePath,
   CircuitBreaker,
   MemoryStore,
+  RedisStore,
   StoreTimeoutError
 } from '../src/index.js';
 
@@ -70,8 +71,8 @@ describe('SmartRate v7 — Day 1: Telemetry Foundation & MetricsCollector', () =
 
     it('delegates to customNormalizer when provided', () => {
       const mockReq = { path: '/custom/path/123' };
-      const customNormalizer = (req) => req.path.startsWith('/custom') ? '/custom/normalized' : '/';
-      assert.equal(normalizeRoute(mockReq, customNormalizer), '/custom/normalized');
+      const customNormalizer = (req) => req.path.startsWith('/custom') ? '/custom/normalized/123?token=secret' : '/';
+      assert.equal(normalizeRoute(mockReq, customNormalizer), '/custom/normalized/:id');
     });
 
     it('falls back to standard normalization if customNormalizer throws or returns non-string', () => {
@@ -476,6 +477,49 @@ describe('SmartRate v7 — Day 1: Telemetry Foundation & MetricsCollector', () =
       assert.equal(res.status, 200);
       assert.equal(res.body.success, true);
       assert.equal(res.body.message, 'unbroken');
+    });
+
+    it('tolerates missing or throwing circuit-breaker telemetry methods', () => {
+      const collectors = [
+        { recordRequest() {} },
+        {
+          recordRequest() {},
+          recordCircuitBreakerState() { throw new Error('telemetry unavailable'); }
+        }
+      ];
+
+      for (const metricsCollector of collectors) {
+        const limiter = rateLimiter({ limit: 5, windowMs: 60000, metricsCollector, circuitBreaker: true });
+        assert.doesNotThrow(() => limiter.circuitBreaker.trip());
+      }
+    });
+
+    it('labels RedisStore and other custom stores accurately in request metrics', async () => {
+      const recordedStoreLabels = [];
+      const metricsCollector = {
+        recordRequest({ store }) { recordedStoreLabels.push(store); }
+      };
+      const result = { allowed: true, remaining: 4, reset: 60 };
+      const redisStore = new RedisStore({ client: { eval() {} } });
+      redisStore.consume = async () => result;
+
+      const app = express();
+      app.get('/custom', rateLimiter({
+        limit: 5,
+        windowMs: 60000,
+        store: { consume: async () => result },
+        metricsCollector
+      }), (req, res) => res.end());
+      app.get('/redis', rateLimiter({
+        limit: 5,
+        windowMs: 60000,
+        store: redisStore,
+        metricsCollector
+      }), (req, res) => res.end());
+
+      assert.equal((await request(app).get('/custom')).status, 200);
+      assert.equal((await request(app).get('/redis')).status, 200);
+      assert.deepEqual(recordedStoreLabels, ['custom', 'redis']);
     });
   });
 

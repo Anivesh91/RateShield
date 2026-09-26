@@ -40,8 +40,11 @@ export function calculatePercentiles(samplesNs) {
   const meanUs = sumUs / count;
 
   const getPercentile = (p) => {
-    const idx = Math.min(count - 1, Math.max(0, Math.floor((p / 100) * count)));
-    return samplesUs[idx];
+    const rank = (p / 100) * (count - 1);
+    const lowerIndex = Math.floor(rank);
+    const upperIndex = Math.ceil(rank);
+    const fraction = rank - lowerIndex;
+    return samplesUs[lowerIndex] + (samplesUs[upperIndex] - samplesUs[lowerIndex]) * fraction;
   };
 
   const minUs = samplesUs[0];
@@ -132,7 +135,7 @@ export async function runBenchmark(options = {}) {
   // Define scenarios
   const scenarios = [
     {
-      name: '1. Express Baseline (No Rate Limiting)',
+      name: '1. No-op Middleware (next() only)',
       middleware: (req, res, next) => next()
     },
     {

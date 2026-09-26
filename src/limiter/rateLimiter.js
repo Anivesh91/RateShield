@@ -1,4 +1,5 @@
 import { MemoryStore } from '../stores/memoryStore.js';
+import { RedisStore } from '../stores/redisStore.js';
 import { ResilientStore } from '../stores/resilientStore.js';
 import { buildRateLimitKey } from '../utils/keyBuilder.js';
 import { withTimeout } from '../resilience/timeoutGuard.js';
@@ -312,14 +313,21 @@ export function rateLimiter(options = {}) {
   }
 
   if (collector && breaker) {
-    collector.recordCircuitBreakerState(breaker.getState());
-    breaker.on('stateChange', (evt) => {
+    const recordCircuitBreakerState = (state) => {
       try {
-        collector.recordCircuitBreakerState(evt.to);
+        if (typeof collector.recordCircuitBreakerState === 'function') {
+          collector.recordCircuitBreakerState(state);
+        }
       } catch {
         // Safe telemetry
       }
-    });
+    };
+    breaker.on('stateChange', (evt) => recordCircuitBreakerState(evt.to));
+    try {
+      recordCircuitBreakerState(breaker.getState());
+    } catch {
+      // Safe telemetry
+    }
   }
 
   const isResilient = store instanceof ResilientStore;
@@ -342,7 +350,9 @@ export function rateLimiter(options = {}) {
       const method = (req.method || 'GET').toUpperCase();
       const routeKey = getRouteIdentifier(req);
       const normalizedRoute = (collector || otelBridge) ? normalizeRoute(req, routeNormalizer) : '/';
-      const defaultStoreLabel = isResilient ? 'resilient' : (store instanceof MemoryStore ? 'memory' : 'redis');
+      const defaultStoreLabel = isResilient
+        ? 'resilient'
+        : (store instanceof RedisStore ? 'redis' : (store instanceof MemoryStore ? 'memory' : 'custom'));
 
       const key = buildRateLimitKey({
         algorithm,

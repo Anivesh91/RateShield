@@ -29,10 +29,10 @@ describe('SmartRate v7 — Day 4: Performance Benchmarking & Observability Demo'
       assert.equal(stats.count, 100);
       assert.equal(stats.minUs, 1); // 1000ns = 1µs
       assert.equal(stats.maxUs, 100); // 100000ns = 100µs
-      assert.equal(stats.p50Us, 51); // 50th percentile
-      assert.equal(stats.p90Us, 91);
-      assert.equal(stats.p95Us, 96);
-      assert.equal(stats.p99Us, 100);
+      assert.equal(stats.p50Us, 50.5); // Linearly interpolated 50th percentile
+      assert.equal(stats.p90Us, 90.1);
+      assert.equal(stats.p95Us, 95.05);
+      assert.equal(stats.p99Us, 99.01);
 
       // Verify mathematical percentile invariant: min <= p50 <= p90 <= p95 <= p99 <= max
       assert.ok(stats.minUs <= stats.p50Us);
@@ -44,7 +44,10 @@ describe('SmartRate v7 — Day 4: Performance Benchmarking & Observability Demo'
       // Verify millisecond unit conversions
       assert.equal(stats.minMs, 0.001);
       assert.equal(stats.maxMs, 0.1);
-      assert.equal(stats.p50Ms, 0.051);
+      assert.equal(stats.p50Ms, 0.0505);
+
+      const twoSampleStats = calculatePercentiles([1000n, 3000n]);
+      assert.equal(twoSampleStats.p50Us, 2);
     });
   });
 
@@ -69,7 +72,7 @@ describe('SmartRate v7 — Day 4: Performance Benchmarking & Observability Demo'
       }
 
       // First scenario should be baseline with 0 overhead
-      assert.ok(report.scenarios[0].scenario.includes('Baseline'));
+      assert.ok(report.scenarios[0].scenario.includes('No-op Middleware'));
       assert.equal(report.scenarios[0].overheadP50Us, 0);
     });
   });
