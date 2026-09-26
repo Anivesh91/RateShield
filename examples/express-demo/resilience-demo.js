@@ -11,7 +11,6 @@ import {
 const app = express();
 const PORT = Number(process.env.DEMO_PORT || 3004);
 
-app.set('trust proxy', true);
 app.use(express.json());
 
 // Simulated Distributed Primary Store (mimics Redis with fault injection)

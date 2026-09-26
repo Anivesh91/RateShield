@@ -8,9 +8,16 @@ SmartRate provides high-performance, zero-dependency in-memory rate limiting and
 
 ```javascript
 import express from 'express';
+import { createClient } from 'redis';
 import { rateLimiter, RedisStore, ResilientStore, MemoryStore } from 'smart-rate';
 
 const app = express();
+const redisClient = createClient({
+  url: process.env.REDIS_URL || 'redis://localhost:6379'
+});
+redisClient.on('error', (error) => console.error('Redis client error:', error));
+await redisClient.connect();
+const loginHandler = (req, res) => res.json({ success: true });
 
 // 1. Resilient Distributed Rate Limiter with In-Memory Fallback
 // If Redis crashes or experiences network latency > 250ms:
@@ -53,7 +60,11 @@ app.post(
   }),
   loginHandler
 );
+
+app.listen(3000, () => console.log('SmartRate listening on http://localhost:3000'));
 ```
+
+Start Redis before running this example. Once the server is running, stopping Redis demonstrates the configured fallback behavior; start it again to observe recovery.
 
 ---
 
@@ -197,7 +208,7 @@ app.use(
 | `RateLimit-Remaining` | `94` | Tokens or requests remaining in current window |
 | `RateLimit-Reset` | `12` | Seconds until quota replenishment or next retry eligibility |
 | `Retry-After` | `30` | *(HTTP 429 & 503 only)* Seconds client must sleep before retrying |
-| `RateLimit-Degraded` | `true` | *(Present during store failover only)* Indicates rate limiting is operating in fallback mode |
+| `RateLimit-Degraded` | `true` | Indicates a store failure or timeout. A configured fallback store enforces its own quota; with `fail-open` and no fallback, the request proceeds without rate limiting. This header does not by itself mean fallback quota enforcement is active. |
 
 ---
 
