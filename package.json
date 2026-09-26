@@ -12,6 +12,7 @@
     "demo:sliding": "node examples/express-demo/sliding-demo.js",
     "demo:saas": "node examples/express-demo/saas-demo.js",
     "demo:burst": "node examples/express-demo/burst-demo.js",
+    "demo:resilience": "node examples/express-demo/resilience-demo.js",
     "test": "node --test"
   },
   "keywords": [
