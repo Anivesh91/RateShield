@@ -1,6 +1,7 @@
 import { MemoryStore } from '../stores/memoryStore.js';
 import { buildRateLimitKey } from '../utils/keyBuilder.js';
 import { withTimeout } from '../resilience/timeoutGuard.js';
+import { CircuitBreaker } from '../resilience/circuitBreaker.js';
 
 const defaultMemoryStore = new MemoryStore();
 
@@ -34,7 +35,11 @@ function validateOptions(options) {
     refillIntervalMs,
     cost,
     timeoutMs,
-    onStoreError
+    onStoreError,
+    circuitBreaker,
+    failureThreshold,
+    resetTimeoutMs,
+    successThreshold
   } = options;
 
   if (timeoutMs !== undefined && (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
@@ -50,6 +55,37 @@ function validateOptions(options) {
     throw new TypeError(
       `SmartRate: 'onStoreError' must be 'fail-open', 'fail-closed', 'error', or a function (received: ${onStoreError}).`
     );
+  }
+
+  if (circuitBreaker !== undefined) {
+    if (typeof circuitBreaker !== 'boolean' && (typeof circuitBreaker !== 'object' || circuitBreaker === null)) {
+      throw new TypeError("SmartRate: 'circuitBreaker' must be a boolean, an options object, or a CircuitBreaker instance.");
+    }
+    if (typeof circuitBreaker === 'object' && !(circuitBreaker instanceof CircuitBreaker)) {
+      const cbFailureThreshold = circuitBreaker.failureThreshold;
+      const cbResetTimeoutMs = circuitBreaker.resetTimeoutMs;
+      const cbSuccessThreshold = circuitBreaker.successThreshold;
+
+      if (cbFailureThreshold !== undefined && (typeof cbFailureThreshold !== 'number' || !Number.isInteger(cbFailureThreshold) || cbFailureThreshold <= 0)) {
+        throw new RangeError(`SmartRate: CircuitBreaker 'failureThreshold' must be a positive integer (received: ${cbFailureThreshold}).`);
+      }
+      if (cbResetTimeoutMs !== undefined && (typeof cbResetTimeoutMs !== 'number' || !Number.isFinite(cbResetTimeoutMs) || cbResetTimeoutMs <= 0)) {
+        throw new RangeError(`SmartRate: CircuitBreaker 'resetTimeoutMs' must be a positive number in milliseconds (received: ${cbResetTimeoutMs}).`);
+      }
+      if (cbSuccessThreshold !== undefined && (typeof cbSuccessThreshold !== 'number' || !Number.isInteger(cbSuccessThreshold) || cbSuccessThreshold <= 0)) {
+        throw new RangeError(`SmartRate: CircuitBreaker 'successThreshold' must be a positive integer (received: ${cbSuccessThreshold}).`);
+      }
+    }
+  }
+
+  if (failureThreshold !== undefined && (typeof failureThreshold !== 'number' || !Number.isInteger(failureThreshold) || failureThreshold <= 0)) {
+    throw new RangeError(`SmartRate: CircuitBreaker 'failureThreshold' must be a positive integer (received: ${failureThreshold}).`);
+  }
+  if (resetTimeoutMs !== undefined && (typeof resetTimeoutMs !== 'number' || !Number.isFinite(resetTimeoutMs) || resetTimeoutMs <= 0)) {
+    throw new RangeError(`SmartRate: CircuitBreaker 'resetTimeoutMs' must be a positive number in milliseconds (received: ${resetTimeoutMs}).`);
+  }
+  if (successThreshold !== undefined && (typeof successThreshold !== 'number' || !Number.isInteger(successThreshold) || successThreshold <= 0)) {
+    throw new RangeError(`SmartRate: CircuitBreaker 'successThreshold' must be a positive integer (received: ${successThreshold}).`);
   }
 
   if (keyGenerator !== undefined && typeof keyGenerator !== 'function') {
@@ -162,6 +198,10 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
  * @param {number|Function} [options.cost=1] - Request cost in tokens (or dynamic function)
  * @param {number} [options.timeoutMs=250] - Store operation timeout in milliseconds
  * @param {'fail-open'|'fail-closed'|'error'|Function} [options.onStoreError] - Policy when store errors or times out
+ * @param {boolean|Object|CircuitBreaker} [options.circuitBreaker] - Circuit breaker configuration or instance
+ * @param {number} [options.failureThreshold=5] - Consecutive failures before opening circuit
+ * @param {number} [options.resetTimeoutMs=10000] - Duration in ms before testing recovery in HALF_OPEN
+ * @param {number} [options.successThreshold=1] - Consecutive successful probes in HALF_OPEN to close circuit
  * @param {Function} [options.keyGenerator] - Custom client identifier extractor
  * @param {Object} [options.store] - Store implementation (defaults to MemoryStore)
  * @returns {import('express').RequestHandler}
@@ -177,13 +217,28 @@ export function rateLimiter(options = {}) {
     refillIntervalMs = 1000,
     cost = 1,
     timeoutMs = 250,
-    onStoreError
+    onStoreError,
+    circuitBreaker,
+    failureThreshold,
+    resetTimeoutMs,
+    successThreshold
   } = options;
   const algorithm = options.algorithm || 'fixed-window';
   const store = options.store || defaultMemoryStore;
   const keyGenerator = options.keyGenerator || defaultKeyGenerator;
 
-  return async function rateLimiterMiddleware(req, res, next) {
+  let breaker = null;
+  if (circuitBreaker instanceof CircuitBreaker) {
+    breaker = circuitBreaker;
+  } else if (typeof circuitBreaker === 'object' && circuitBreaker !== null) {
+    breaker = new CircuitBreaker(circuitBreaker);
+  } else if (circuitBreaker === true) {
+    breaker = new CircuitBreaker({ failureThreshold, resetTimeoutMs, successThreshold });
+  } else if (failureThreshold !== undefined || resetTimeoutMs !== undefined || successThreshold !== undefined) {
+    breaker = new CircuitBreaker({ failureThreshold, resetTimeoutMs, successThreshold });
+  }
+
+  const rateLimiterMiddleware = async function rateLimiterMiddleware(req, res, next) {
     try {
       const rawIdentifier = await keyGenerator(req);
       const clientIdentifier = (rawIdentifier !== undefined && rawIdentifier !== null && String(rawIdentifier).trim().length > 0)
@@ -255,19 +310,22 @@ export function rateLimiter(options = {}) {
 
       let result;
       try {
-        result = await withTimeout(
-          store.consume({
-            key,
-            limit: resolvedLimit,
-            windowMs: resolvedWindowMs,
-            algorithm,
-            capacity: resolvedCapacity,
-            refillRate: resolvedRefillRate,
-            refillIntervalMs: resolvedRefillIntervalMs,
-            cost: requestCost
-          }),
-          timeoutMs
-        );
+        const consumeOp = () =>
+          withTimeout(
+            store.consume({
+              key,
+              limit: resolvedLimit,
+              windowMs: resolvedWindowMs,
+              algorithm,
+              capacity: resolvedCapacity,
+              refillRate: resolvedRefillRate,
+              refillIntervalMs: resolvedRefillIntervalMs,
+              cost: requestCost
+            }),
+            timeoutMs
+          );
+
+        result = breaker ? await breaker.execute(consumeOp) : await consumeOp();
       } catch (storeError) {
         if (typeof res.setHeader === 'function' && !res.headersSent) {
           res.setHeader('RateLimit-Degraded', 'true');
@@ -322,6 +380,9 @@ export function rateLimiter(options = {}) {
       return next(err);
     }
   };
+
+  rateLimiterMiddleware.circuitBreaker = breaker;
+  return rateLimiterMiddleware;
 }
 
 export default rateLimiter;
