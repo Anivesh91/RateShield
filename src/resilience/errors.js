@@ -18,3 +18,27 @@ export class StoreTimeoutError extends Error {
     }
   }
 }
+
+/**
+ * Error thrown when a store operation is blocked because the Circuit Breaker is in OPEN state.
+ */
+export class CircuitBreakerOpenError extends Error {
+  /**
+   * @param {string} [message] - Optional custom error message
+   * @param {number} [resetTimeoutMs] - Remaining or configured reset timeout duration
+   */
+  constructor(message, resetTimeoutMs) {
+    super(message || 'SmartRate: Circuit breaker is OPEN. Store operations temporarily suspended.');
+    this.name = 'CircuitBreakerOpenError';
+    this.isCircuitOpen = true;
+    this.code = 'ERR_CIRCUIT_OPEN';
+    if (resetTimeoutMs !== undefined) {
+      this.resetTimeoutMs = resetTimeoutMs;
+    }
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, CircuitBreakerOpenError);
+    }
+  }
+}
+
