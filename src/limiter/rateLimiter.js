@@ -262,7 +262,7 @@ export function rateLimiter(options = {}) {
     store = new ResilientStore({
       primaryStore: store,
       fallbackStore: fallbackStore === true ? undefined : fallbackStore,
-      circuitBreaker: breaker || undefined,
+      circuitBreaker: circuitBreaker === false ? false : (breaker || undefined),
       timeoutMs
     });
     breaker = store.circuitBreaker;
@@ -392,7 +392,7 @@ export function rateLimiter(options = {}) {
         }
 
         if (typeof onStoreError === 'function') {
-          return onStoreError(storeError, req, res, next);
+          return await onStoreError(storeError, req, res, next);
         }
 
         return next(storeError);

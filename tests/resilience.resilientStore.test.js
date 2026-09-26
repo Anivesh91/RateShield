@@ -514,6 +514,18 @@ describe('SmartRate v6 — Day 3: Dual-Store Fallback & ResilientStore Engine', 
   });
 
   describe('8. Express Integration & Header Tagging', () => {
+    it('preserves circuitBreaker: false when constructing fallbackStore resilience', () => {
+      const limiter = rateLimiter({
+        limit: 5,
+        windowMs: 60000,
+        store: { consume: async () => ({ allowed: true }) },
+        fallbackStore: true,
+        circuitBreaker: false
+      });
+
+      assert.equal(limiter.circuitBreaker, null);
+    });
+
     it('uses the ResilientStore breaker and rejects conflicting middleware breaker options', () => {
       const resilientStore = new ResilientStore({ primaryStore: { consume: async () => ({ allowed: true }) } });
       const limiter = rateLimiter({ store: resilientStore, limit: 5, windowMs: 60000 });

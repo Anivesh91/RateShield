@@ -190,6 +190,68 @@ describe('SmartRate v6 — Day 2: Store Circuit Breaker Engine', () => {
       assert.equal(cb.isClosed(), true);
     });
 
+    it('does not let a pre-probe call record a HALF_OPEN outcome or release the probe slot', async () => {
+      const cb = new CircuitBreaker({ failureThreshold: 1, resetTimeoutMs: 30 });
+      let resolveEarlierCall;
+      let resolveProbe;
+
+      const earlierCall = cb.execute(() => new Promise((resolve) => {
+        resolveEarlierCall = resolve;
+      }));
+      await assert.rejects(async () => cb.execute(() => Promise.reject(new Error('trip'))));
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      const probe = cb.execute(() => new Promise((resolve) => {
+        resolveProbe = resolve;
+      }));
+      resolveEarlierCall('earlier-success');
+      assert.equal(await earlierCall, 'earlier-success');
+      assert.equal(cb.isHalfOpen(), true);
+      assert.equal(cb.getStats().probeInFlight, true);
+
+      await assert.rejects(
+        async () => cb.execute(() => Promise.resolve('unexpected')),
+        { name: 'CircuitBreakerOpenError' }
+      );
+
+      resolveProbe('probe-success');
+      assert.equal(await probe, 'probe-success');
+      assert.equal(cb.isClosed(), true);
+    });
+
+    it('ignores stale probe outcomes after manual reset or trip', async () => {
+      const createHalfOpenBreaker = async () => {
+        const breaker = new CircuitBreaker({ failureThreshold: 1, resetTimeoutMs: 30 });
+        await assert.rejects(async () => breaker.execute(() => Promise.reject(new Error('trip'))));
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        assert.equal(breaker.isHalfOpen(), true);
+        return breaker;
+      };
+
+      const resetBreaker = await createHalfOpenBreaker();
+      let rejectStaleProbe;
+      const staleFailure = resetBreaker.execute(() => new Promise((resolve, reject) => {
+        rejectStaleProbe = reject;
+      }));
+      resetBreaker.reset();
+      rejectStaleProbe(new Error('stale probe failure'));
+      await assert.rejects(staleFailure, /stale probe failure/);
+      assert.equal(resetBreaker.isClosed(), true);
+      assert.equal(resetBreaker.getStats().consecutiveFailures, 0);
+      assert.equal(resetBreaker.getStats().probeInFlight, false);
+
+      const trippedBreaker = await createHalfOpenBreaker();
+      let resolveStaleProbe;
+      const staleSuccess = trippedBreaker.execute(() => new Promise((resolve) => {
+        resolveStaleProbe = resolve;
+      }));
+      trippedBreaker.trip();
+      resolveStaleProbe('stale probe success');
+      assert.equal(await staleSuccess, 'stale probe success');
+      assert.equal(trippedBreaker.isOpen(), true);
+      assert.equal(trippedBreaker.getStats().probeInFlight, false);
+    });
+
     it('supports manual trip() and reset() overrides', () => {
       const cb = new CircuitBreaker();
       assert.equal(cb.isClosed(), true);

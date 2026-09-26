@@ -74,6 +74,7 @@ export class CircuitBreaker extends EventEmitter {
     this.lastFailureTime = null;
     this.nextAttempt = 0;
     this.probeInFlight = false;
+    this.probeGeneration = 0;
   }
 
   /**
@@ -126,6 +127,7 @@ export class CircuitBreaker extends EventEmitter {
     if (this.state === nextState) return;
 
     const from = this.state;
+    this._invalidateProbe();
     this.state = nextState;
 
     if (nextState === CIRCUIT_STATE.CLOSED) {
@@ -160,6 +162,18 @@ export class CircuitBreaker extends EventEmitter {
     }
   }
 
+  _invalidateProbe() {
+    this.probeGeneration += 1;
+    this.probeInFlight = false;
+  }
+
+  _ownsProbe(token) {
+    return token !== null &&
+      token === this.probeGeneration &&
+      this.probeInFlight &&
+      this.state === CIRCUIT_STATE.HALF_OPEN;
+  }
+
   /**
    * Wraps an async store operation with circuit breaker protection.
    *
@@ -182,6 +196,7 @@ export class CircuitBreaker extends EventEmitter {
       );
     }
 
+    let probeToken = null;
     if (currentState === CIRCUIT_STATE.HALF_OPEN) {
       if (this.probeInFlight) {
         throw new CircuitBreakerOpenError(
@@ -190,21 +205,23 @@ export class CircuitBreaker extends EventEmitter {
         );
       }
       this.probeInFlight = true;
+      probeToken = ++this.probeGeneration;
       this.emit('probe', { timestamp: Date.now() });
     }
 
     try {
       const result = await fn();
-      this._recordSuccess();
+      this._recordSuccess(probeToken);
       return result;
     } catch (err) {
-      if (this.isFailure(err)) {
-        this._recordFailure(err);
+      if ((probeToken === null || this._ownsProbe(probeToken)) && this.isFailure(err)) {
+        this._recordFailure(err, probeToken);
       }
       throw err;
     } finally {
-      if (this.state === CIRCUIT_STATE.HALF_OPEN) {
+      if (this._ownsProbe(probeToken)) {
         this.probeInFlight = false;
+        this.probeGeneration += 1;
       }
     }
   }
@@ -214,8 +231,12 @@ export class CircuitBreaker extends EventEmitter {
    *
    * @private
    */
-  _recordSuccess() {
+  _recordSuccess(probeToken = null) {
+    const isProbe = probeToken !== null;
+    if (isProbe && !this._ownsProbe(probeToken)) return;
+
     if (this.state === CIRCUIT_STATE.HALF_OPEN) {
+      if (!isProbe) return;
       this.consecutiveSuccesses += 1;
       if (this.consecutiveSuccesses >= this.successThreshold) {
         this._transitionTo(CIRCUIT_STATE.CLOSED);
@@ -230,8 +251,12 @@ export class CircuitBreaker extends EventEmitter {
    *
    * @private
    * @param {Error} err
+   * @param {number|null} [probeToken=null]
    */
-  _recordFailure(err) {
+  _recordFailure(err, probeToken = null) {
+    const isProbe = probeToken !== null;
+    if (isProbe && !this._ownsProbe(probeToken)) return;
+    if (this.state === CIRCUIT_STATE.HALF_OPEN && !isProbe) return;
     this.lastFailureTime = Date.now();
     this.consecutiveFailures += 1;
 
@@ -250,6 +275,7 @@ export class CircuitBreaker extends EventEmitter {
    * @param {Error} [error]
    */
   trip(error) {
+    this._invalidateProbe();
     this._transitionTo(CIRCUIT_STATE.OPEN, { error, manual: true });
   }
 
@@ -257,6 +283,7 @@ export class CircuitBreaker extends EventEmitter {
    * Manually resets the circuit into CLOSED state.
    */
   reset() {
+    this._invalidateProbe();
     this._transitionTo(CIRCUIT_STATE.CLOSED, { manual: true });
   }
 

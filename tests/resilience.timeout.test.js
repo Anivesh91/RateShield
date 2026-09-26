@@ -278,5 +278,27 @@ describe('SmartRate v6 — Day 1: Store Timeout & Failure Policies', () => {
       assert.equal(res.body.custom500, true);
       assert.equal(res.body.error, 'Uncaught Redis Store Outage');
     });
+
+    it('forwards rejected async custom handlers through next(err)', async () => {
+      const brokenStore = { consume: async () => { throw new Error('store failed'); } };
+      const app = express();
+
+      app.get(
+        '/async-custom-handler',
+        rateLimiter({
+          limit: 5,
+          windowMs: 60_000,
+          store: brokenStore,
+          onStoreError: async () => { throw new Error('handler failed'); }
+        }),
+        (req, res) => res.json({ ok: true })
+      );
+      app.use((err, req, res, next) => res.status(500).json({ error: err.message }));
+
+      const res = await request(app).get('/async-custom-handler');
+
+      assert.equal(res.status, 500);
+      assert.equal(res.body.error, 'handler failed');
+    });
   });
 });
