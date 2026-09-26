@@ -1,5 +1,9 @@
 import { MemoryStore } from '../stores/memoryStore.js';
+import { ResilientStore } from '../stores/resilientStore.js';
 import { buildRateLimitKey } from '../utils/keyBuilder.js';
+import { withTimeout } from '../resilience/timeoutGuard.js';
+import { CircuitBreaker } from '../resilience/circuitBreaker.js';
+import { CircuitBreakerOpenError } from '../resilience/errors.js';
 
 const defaultMemoryStore = new MemoryStore();
 
@@ -22,7 +26,76 @@ function validateOptions(options) {
     throw new TypeError('SmartRate: Options must be an object.');
   }
 
-  const { limit, windowMs, store, algorithm = 'fixed-window', keyGenerator, capacity, refillRate, refillIntervalMs, cost } = options;
+  const {
+    limit,
+    windowMs,
+    store,
+    algorithm = 'fixed-window',
+    keyGenerator,
+    capacity,
+    refillRate,
+    refillIntervalMs,
+    cost,
+    timeoutMs,
+    onStoreError,
+    circuitBreaker,
+    failureThreshold,
+    resetTimeoutMs,
+    successThreshold,
+    fallbackStore
+  } = options;
+
+  if (fallbackStore !== undefined) {
+    if (typeof fallbackStore !== 'boolean' && (typeof fallbackStore !== 'object' || fallbackStore === null || typeof fallbackStore.consume !== 'function')) {
+      throw new TypeError("SmartRate: 'fallbackStore' must be a boolean or an object implementing a consume() method.");
+    }
+  }
+
+  if (timeoutMs !== undefined && (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+    throw new RangeError(`SmartRate: 'timeoutMs' must be a positive number in milliseconds (received: ${timeoutMs}).`);
+  }
+
+  const VALID_STORE_ERROR_MODES = ['fail-open', 'fail-closed', 'error'];
+  if (
+    onStoreError !== undefined &&
+    typeof onStoreError !== 'function' &&
+    !VALID_STORE_ERROR_MODES.includes(onStoreError)
+  ) {
+    throw new TypeError(
+      `SmartRate: 'onStoreError' must be 'fail-open', 'fail-closed', 'error', or a function (received: ${onStoreError}).`
+    );
+  }
+
+  if (circuitBreaker !== undefined) {
+    if (typeof circuitBreaker !== 'boolean' && (typeof circuitBreaker !== 'object' || circuitBreaker === null)) {
+      throw new TypeError("SmartRate: 'circuitBreaker' must be a boolean, an options object, or a CircuitBreaker instance.");
+    }
+    if (typeof circuitBreaker === 'object' && !(circuitBreaker instanceof CircuitBreaker)) {
+      const cbFailureThreshold = circuitBreaker.failureThreshold;
+      const cbResetTimeoutMs = circuitBreaker.resetTimeoutMs;
+      const cbSuccessThreshold = circuitBreaker.successThreshold;
+
+      if (cbFailureThreshold !== undefined && (typeof cbFailureThreshold !== 'number' || !Number.isInteger(cbFailureThreshold) || cbFailureThreshold <= 0)) {
+        throw new RangeError(`SmartRate: CircuitBreaker 'failureThreshold' must be a positive integer (received: ${cbFailureThreshold}).`);
+      }
+      if (cbResetTimeoutMs !== undefined && (typeof cbResetTimeoutMs !== 'number' || !Number.isFinite(cbResetTimeoutMs) || cbResetTimeoutMs <= 0)) {
+        throw new RangeError(`SmartRate: CircuitBreaker 'resetTimeoutMs' must be a positive number in milliseconds (received: ${cbResetTimeoutMs}).`);
+      }
+      if (cbSuccessThreshold !== undefined && (typeof cbSuccessThreshold !== 'number' || !Number.isInteger(cbSuccessThreshold) || cbSuccessThreshold <= 0)) {
+        throw new RangeError(`SmartRate: CircuitBreaker 'successThreshold' must be a positive integer (received: ${cbSuccessThreshold}).`);
+      }
+    }
+  }
+
+  if (failureThreshold !== undefined && (typeof failureThreshold !== 'number' || !Number.isInteger(failureThreshold) || failureThreshold <= 0)) {
+    throw new RangeError(`SmartRate: CircuitBreaker 'failureThreshold' must be a positive integer (received: ${failureThreshold}).`);
+  }
+  if (resetTimeoutMs !== undefined && (typeof resetTimeoutMs !== 'number' || !Number.isFinite(resetTimeoutMs) || resetTimeoutMs <= 0)) {
+    throw new RangeError(`SmartRate: CircuitBreaker 'resetTimeoutMs' must be a positive number in milliseconds (received: ${resetTimeoutMs}).`);
+  }
+  if (successThreshold !== undefined && (typeof successThreshold !== 'number' || !Number.isInteger(successThreshold) || successThreshold <= 0)) {
+    throw new RangeError(`SmartRate: CircuitBreaker 'successThreshold' must be a positive integer (received: ${successThreshold}).`);
+  }
 
   if (keyGenerator !== undefined && typeof keyGenerator !== 'function') {
     throw new TypeError("SmartRate: 'keyGenerator' must be a function.");
@@ -132,6 +205,12 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
  * @param {number|Function} [options.refillRate] - Token bucket refill rate (or dynamic function)
  * @param {number|Function} [options.refillIntervalMs=1000] - Refill interval duration in milliseconds (or dynamic function)
  * @param {number|Function} [options.cost=1] - Request cost in tokens (or dynamic function)
+ * @param {number} [options.timeoutMs] - Optional store operation timeout in milliseconds
+ * @param {'fail-open'|'fail-closed'|'error'|Function} [options.onStoreError] - Policy when store errors or times out
+ * @param {boolean|Object|CircuitBreaker} [options.circuitBreaker] - Circuit breaker configuration or instance
+ * @param {number} [options.failureThreshold=5] - Consecutive failures before opening circuit
+ * @param {number} [options.resetTimeoutMs=10000] - Duration in ms before testing recovery in HALF_OPEN
+ * @param {number} [options.successThreshold=1] - Consecutive successful probes in HALF_OPEN to close circuit
  * @param {Function} [options.keyGenerator] - Custom client identifier extractor
  * @param {Object} [options.store] - Store implementation (defaults to MemoryStore)
  * @returns {import('express').RequestHandler}
@@ -139,12 +218,59 @@ function setRateLimitHeaders(res, { limit, remaining, reset, retryAfter }) {
 export function rateLimiter(options = {}) {
   validateOptions(options);
 
-  const { limit, windowMs, capacity, refillRate, refillIntervalMs = 1000, cost = 1 } = options;
+  const {
+    limit,
+    windowMs,
+    capacity,
+    refillRate,
+    refillIntervalMs = 1000,
+    cost = 1,
+    timeoutMs,
+    onStoreError,
+    circuitBreaker,
+    failureThreshold,
+    resetTimeoutMs,
+    successThreshold,
+    fallbackStore
+  } = options;
   const algorithm = options.algorithm || 'fixed-window';
-  const store = options.store || defaultMemoryStore;
+  let store = options.store || defaultMemoryStore;
   const keyGenerator = options.keyGenerator || defaultKeyGenerator;
 
-  return async function rateLimiterMiddleware(req, res, next) {
+  let breaker = null;
+  if (circuitBreaker instanceof CircuitBreaker) {
+    breaker = circuitBreaker;
+  } else if (typeof circuitBreaker === 'object' && circuitBreaker !== null) {
+    breaker = new CircuitBreaker(circuitBreaker);
+  } else if (circuitBreaker === true) {
+    breaker = new CircuitBreaker({ failureThreshold, resetTimeoutMs, successThreshold });
+  } else if (failureThreshold !== undefined || resetTimeoutMs !== undefined || successThreshold !== undefined) {
+    breaker = new CircuitBreaker({ failureThreshold, resetTimeoutMs, successThreshold });
+  }
+
+  if (store instanceof ResilientStore) {
+    const hasBreakerOptions =
+      circuitBreaker !== undefined ||
+      failureThreshold !== undefined ||
+      resetTimeoutMs !== undefined ||
+      successThreshold !== undefined;
+    if (hasBreakerOptions && breaker !== store.circuitBreaker) {
+      throw new TypeError("SmartRate: Configure the circuit breaker on the ResilientStore when using it as the store.");
+    }
+    breaker = store.circuitBreaker;
+  } else if (fallbackStore) {
+    store = new ResilientStore({
+      primaryStore: store,
+      fallbackStore: fallbackStore === true ? undefined : fallbackStore,
+      circuitBreaker: circuitBreaker === false ? false : (breaker || undefined),
+      timeoutMs
+    });
+    breaker = store.circuitBreaker;
+  }
+
+  const isResilient = store instanceof ResilientStore;
+
+  const rateLimiterMiddleware = async function rateLimiterMiddleware(req, res, next) {
     try {
       const rawIdentifier = await keyGenerator(req);
       const clientIdentifier = (rawIdentifier !== undefined && rawIdentifier !== null && String(rawIdentifier).trim().length > 0)
@@ -214,16 +340,80 @@ export function rateLimiter(options = {}) {
         }
       }
 
-      const result = await store.consume({
-        key,
-        limit: resolvedLimit,
-        windowMs: resolvedWindowMs,
-        algorithm,
-        capacity: resolvedCapacity,
-        refillRate: resolvedRefillRate,
-        refillIntervalMs: resolvedRefillIntervalMs,
-        cost: requestCost
-      });
+      let result;
+      try {
+        const consumeOp = () => {
+          const storeOperation = store.consume({
+            key,
+            limit: resolvedLimit,
+            windowMs: resolvedWindowMs,
+            algorithm,
+            capacity: resolvedCapacity,
+            refillRate: resolvedRefillRate,
+            refillIntervalMs: resolvedRefillIntervalMs,
+            cost: requestCost
+          });
+          return (timeoutMs === undefined || isResilient) ? storeOperation : withTimeout(storeOperation, timeoutMs);
+        };
+
+        result = (breaker && !isResilient) ? await breaker.execute(consumeOp) : await consumeOp();
+      } catch (storeError) {
+        if (typeof res.setHeader === 'function' && !res.headersSent) {
+          res.setHeader('RateLimit-Degraded', 'true');
+        }
+
+        req.rateLimit = {
+          degraded: true,
+          storeError
+        };
+
+        if (onStoreError === 'fail-open') {
+          return next();
+        }
+
+        if (onStoreError === 'fail-closed') {
+          let retryAfterSeconds = 30;
+
+          if (storeError instanceof CircuitBreakerOpenError && typeof storeError.resetTimeoutMs === 'number') {
+            retryAfterSeconds = Math.max(1, Math.ceil(storeError.resetTimeoutMs / 1000));
+          } else if (breaker && breaker.isOpen()) {
+            const remainingMs = Math.max(0, breaker.nextAttempt - Date.now());
+            retryAfterSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+          }
+
+          if (typeof res.setHeader === 'function' && !res.headersSent) {
+            res.setHeader('Retry-After', String(retryAfterSeconds));
+          }
+          return res.status(503).json({
+            success: false,
+            error: 'Service Unavailable',
+            message: 'Rate limiting service temporarily unavailable'
+          });
+        }
+
+        if (typeof onStoreError === 'function') {
+          return await onStoreError(storeError, req, res, next);
+        }
+
+        return next(storeError);
+      }
+
+      if (result.degraded) {
+        if (typeof res.setHeader === 'function' && !res.headersSent) {
+          res.setHeader('RateLimit-Degraded', 'true');
+        }
+
+        const primaryErrorName = typeof result.primaryError?.name === 'string' && result.primaryError.name
+          ? result.primaryError.name
+          : 'Error';
+
+        req.rateLimit = {
+          degraded: true,
+          fallbackUsed: Boolean(result.fallbackUsed),
+          store: result.store,
+          primaryError: primaryErrorName
+        };
+      }
 
       const headerLimit = algorithm === 'token-bucket' ? resolvedCapacity : resolvedLimit;
 
@@ -247,6 +437,9 @@ export function rateLimiter(options = {}) {
       return next(err);
     }
   };
+
+  rateLimiterMiddleware.circuitBreaker = breaker;
+  return rateLimiterMiddleware;
 }
 
 export default rateLimiter;
