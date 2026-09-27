@@ -67,6 +67,7 @@ export class CircuitBreaker extends EventEmitter {
     this.resetTimeoutMs = resetTimeoutMs;
     this.successThreshold = successThreshold;
     this.isFailure = isFailure;
+    this.id = (typeof options.id === 'string' && options.id.trim()) || (typeof options.name === 'string' && options.name.trim()) || null;
 
     this.state = CIRCUIT_STATE.CLOSED;
     this.consecutiveFailures = 0;

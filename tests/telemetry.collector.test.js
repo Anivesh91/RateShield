@@ -543,4 +543,128 @@ describe('SmartRate v7 — Day 1: Telemetry Foundation & MetricsCollector', () =
       assert.equal(snapshot.counters[METRIC_NAMES.REQUESTS_TOTAL][0].value, 1);
     });
   });
+
+  describe('7. Hardening: ResilientStore Telemetry, Breaker Isolation, and Cardinality Bounds', () => {
+    it('sanitizes ULID segments with :id in routeNormalizer', () => {
+      assert.equal(
+        sanitizePath('/orders/01ARZ3NDEKTSV4RRFFQ69G5FAV'),
+        '/orders/:id'
+      );
+      assert.equal(
+        sanitizePath('/orders/01ARZ3NDEKTSV4RRFFQ69G5FAV/items'),
+        '/orders/:id/items'
+      );
+    });
+
+    it('sanitizes CUID segments with :id in routeNormalizer', () => {
+      assert.equal(
+        sanitizePath('/items/c012345678901234567890123'),
+        '/items/:id'
+      );
+      assert.equal(
+        sanitizePath('/users/c012345678901234567890123/profile'),
+        '/users/:id/profile'
+      );
+    });
+
+    it('enforces maxSeries cardinality bound by collapsing overflow routes into _overflow', () => {
+      const collector = new MetricsCollector({ maxSeries: 2 });
+
+      collector.recordRequest({ outcome: 'allowed', normalized_route: '/route1' });
+      collector.recordRequest({ outcome: 'allowed', normalized_route: '/route2' });
+      // 3rd route exceeds maxSeries (2), should be directed to _overflow
+      collector.recordRequest({ outcome: 'allowed', normalized_route: '/route3' });
+      collector.recordRequest({ outcome: 'allowed', normalized_route: '/route4' });
+
+      const snapshot = collector.getSnapshot();
+      const records = snapshot.counters[METRIC_NAMES.REQUESTS_TOTAL];
+      assert.equal(records.length, 3); // route1, route2, and _overflow
+      const overflowRecord = records.find((r) => r.labels.normalized_route === '_overflow');
+      assert.ok(overflowRecord, 'Must have an _overflow series');
+      assert.equal(overflowRecord.value, 2);
+    });
+
+    it('records store error when ResilientStore primary store fails and falls back to memory', async () => {
+      const collector = new MetricsCollector();
+      const failingPrimary = {
+        name: 'redis',
+        consume: async () => {
+          const err = new Error('Connection refused to redis:6379');
+          err.code = 'ECONNREFUSED';
+          throw err;
+        }
+      };
+
+      const app = express();
+      const limiter = rateLimiter({
+        limit: 10,
+        windowMs: 60000,
+        store: failingPrimary,
+        fallbackStore: true,
+        metricsCollector: collector
+      });
+
+      app.get('/resilient-test', limiter, (req, res) => res.json({ ok: true }));
+
+      const res = await request(app).get('/resilient-test');
+      assert.equal(res.status, 200);
+      assert.equal(res.headers['ratelimit-degraded'], 'true');
+
+      const snapshot = collector.getSnapshot();
+      // Verify store error was recorded
+      const storeErrors = snapshot.counters[METRIC_NAMES.STORE_ERRORS_TOTAL];
+      assert.ok(storeErrors && storeErrors.length > 0, 'Must record store error');
+      assert.equal(storeErrors[0].labels.store, 'redis');
+      assert.equal(storeErrors[0].labels.error_type, 'econnrefused');
+      assert.equal(storeErrors[0].value, 1);
+
+      // Verify degraded request was recorded
+      const degraded = snapshot.counters[METRIC_NAMES.DEGRADED_REQUESTS_TOTAL];
+      assert.ok(degraded && degraded.length > 0, 'Must record degraded request');
+      assert.equal(degraded[0].value, 1);
+    });
+
+    it('isolates multi-breaker states using breakerId without collision', async () => {
+      const collector = new MetricsCollector();
+      const authBreaker = new CircuitBreaker({ failureThreshold: 1, resetTimeoutMs: 60000, id: 'auth' });
+      const apiBreaker = new CircuitBreaker({ failureThreshold: 5, resetTimeoutMs: 60000, id: 'api' });
+
+      rateLimiter({ limit: 10, windowMs: 60000, circuitBreaker: authBreaker, metricsCollector: collector });
+      rateLimiter({ limit: 10, windowMs: 60000, circuitBreaker: apiBreaker, metricsCollector: collector });
+
+      // Trip only auth breaker to OPEN
+      try {
+        await authBreaker.execute(() => { throw new Error('Auth store down'); });
+      } catch {}
+
+      assert.equal(authBreaker.getState(), 'OPEN');
+      assert.equal(apiBreaker.getState(), 'CLOSED');
+
+      const snapshot = collector.getSnapshot();
+      const gaugeRecords = snapshot.gauges[METRIC_NAMES.CIRCUIT_BREAKER_STATE];
+      const authGauge = gaugeRecords.find((g) => g.labels.breaker === 'auth');
+      const apiGauge = gaugeRecords.find((g) => g.labels.breaker === 'api');
+
+      assert.ok(authGauge, 'auth breaker gauge must exist');
+      assert.ok(apiGauge, 'api breaker gauge must exist');
+      assert.equal(authGauge.value, 2, 'auth breaker must be OPEN (2)');
+      assert.equal(apiGauge.value, 0, 'api breaker must be CLOSED (0)');
+    });
+
+    it('deduplicates stateChange listeners when multiple limiters share a single CircuitBreaker', () => {
+      const collector = new MetricsCollector();
+      const sharedBreaker = new CircuitBreaker({ id: 'shared-pool' });
+
+      for (let i = 0; i < 15; i++) {
+        rateLimiter({
+          limit: 10,
+          windowMs: 60000,
+          circuitBreaker: sharedBreaker,
+          metricsCollector: collector
+        });
+      }
+
+      assert.equal(sharedBreaker.listenerCount('stateChange'), 1);
+    });
+  });
 });

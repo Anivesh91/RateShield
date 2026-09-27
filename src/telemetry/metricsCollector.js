@@ -32,9 +32,11 @@ export class MetricsCollector {
   /**
    * @param {Object} [options]
    * @param {number[]} [options.storeDurationBuckets] - Custom histogram buckets in seconds
+   * @param {number} [options.maxSeries=1000] - Hard cap on unique label series per metric
    */
   constructor(options = {}) {
     this.storeDurationBuckets = options.storeDurationBuckets || DEFAULT_STORE_DURATION_BUCKETS;
+    this.maxSeries = typeof options.maxSeries === 'number' && options.maxSeries > 0 ? options.maxSeries : 1000;
 
     // Internal storage: metricName -> Map(serializedLabelKey -> metricRecord)
     this.counters = new Map();
@@ -62,8 +64,24 @@ export class MetricsCollector {
       }
 
       const metricMap = this.counters.get(name);
-      const labelKey = serializeLabelKey(labels);
-      const current = metricMap.get(labelKey) || { value: 0, labels: { ...labels } };
+      let targetLabels = labels;
+      let labelKey = serializeLabelKey(targetLabels);
+
+      if (!metricMap.has(labelKey)) {
+        if (metricMap.size >= this.maxSeries) {
+          if (labels && labels.normalized_route) {
+            targetLabels = { ...labels, normalized_route: '_overflow' };
+            labelKey = serializeLabelKey(targetLabels);
+            if (!metricMap.has(labelKey) && metricMap.size > this.maxSeries) {
+              return;
+            }
+          } else {
+            return;
+          }
+        }
+      }
+
+      const current = metricMap.get(labelKey) || { value: 0, labels: { ...targetLabels } };
 
       current.value += value;
       metricMap.set(labelKey, current);
@@ -89,11 +107,18 @@ export class MetricsCollector {
       }
 
       const metricMap = this.gauges.get(name);
-      const labelKey = serializeLabelKey(labels);
+      let targetLabels = labels;
+      let labelKey = serializeLabelKey(targetLabels);
+
+      if (!metricMap.has(labelKey)) {
+        if (metricMap.size >= this.maxSeries) {
+          return;
+        }
+      }
 
       metricMap.set(labelKey, {
         value,
-        labels: { ...labels }
+        labels: { ...targetLabels }
       });
     } catch {
       // Fail silent
@@ -118,13 +143,21 @@ export class MetricsCollector {
       }
 
       const metricMap = this.histograms.get(name);
-      const labelKey = serializeLabelKey(labels);
+      let targetLabels = labels;
+      let labelKey = serializeLabelKey(targetLabels);
+
+      if (!metricMap.has(labelKey)) {
+        if (metricMap.size >= this.maxSeries) {
+          return;
+        }
+      }
+
       let record = metricMap.get(labelKey);
 
       if (!record) {
         const sortedBounds = [...customBuckets].sort((a, b) => a - b);
         record = {
-          labels: { ...labels },
+          labels: { ...targetLabels },
           buckets: sortedBounds.map((le) => ({ le, count: 0 })),
           sum: 0,
           count: 0
@@ -196,14 +229,15 @@ export class MetricsCollector {
    * Convenience: Updates the circuit breaker state gauge.
    *
    * @param {'CLOSED'|'HALF_OPEN'|'OPEN'|string} state
+   * @param {Object} [labels={}] - Optional breaker labels (e.g. { breaker: 'auth' })
    */
-  recordCircuitBreakerState(state) {
+  recordCircuitBreakerState(state, labels = {}) {
     const numericValue =
       CIRCUIT_STATE_GAUGE_VALUES[state] !== undefined
         ? CIRCUIT_STATE_GAUGE_VALUES[state]
         : CIRCUIT_STATE_GAUGE_VALUES.CLOSED;
 
-    this.setGauge(METRIC_NAMES.CIRCUIT_BREAKER_STATE, numericValue);
+    this.setGauge(METRIC_NAMES.CIRCUIT_BREAKER_STATE, numericValue, labels);
   }
 
   /**

@@ -109,8 +109,9 @@ SmartRate v6 solves the most critical operational failure mode of distributed ra
   - Prevents slow Redis instances or stalled network sockets from exhausting Node.js event-loop queues or cascading into HTTP 504 gateway timeouts.
   - If a store call exceeds `timeoutMs` (default 250ms), a `StoreTimeoutError` is raised promptly, triggering the configured failure policy.
 * **Store Failure Policies (`onStoreError`)**:
-  - `'fail-open'` (default): Requests bypass rate limiting cleanly during catastrophic failures, prioritizing maximum service availability.
-  - `'fail-closed'`: Requests are rejected with `HTTP 503 Service Unavailable` and dynamic `Retry-After`, protecting upstream infrastructure under heavy load.
+  - `next(err)` (default): When omitted, store errors bubble to the Express error pipeline (`next(storeError)`).
+  - `'fail-open'`: Requests bypass rate limiting cleanly during catastrophic failures, prioritizing maximum service availability (`next()`). Sets `RateLimit-Degraded: true`.
+  - `'fail-closed'`: Requests are rejected with `HTTP 503 Service Unavailable` and dynamic `Retry-After`, protecting upstream infrastructure under heavy load. Sets `RateLimit-Degraded: true`.
   - Custom function `(err, req, res, next)`: Allows custom fallback logging, error reporting, or alternate routing.
 * **Circuit Breaker Engine (`CircuitBreaker`, `CIRCUIT_STATE`)**:
   - Implements a resilient 3-state finite state machine (`CLOSED`, `OPEN`, `HALF_OPEN`).
@@ -211,23 +212,29 @@ app.use(
     fallbackStore: true,                // Set true to auto-wrap with MemoryStore fallback, or pass custom store
     
     // Timeout Guard
-    timeoutMs: 250,                     // Max execution time per store call (default: 250ms)
+    timeoutMs: 250,                     // Max store execution time (default: 250ms when using fallbackStore/ResilientStore; optional on direct stores)
     
     // Store Failure Strategy (when no fallbackStore is configured)
-    onStoreError: 'fail-open',          // 'fail-open' (default), 'fail-closed', or custom (err, req, res, next)
+    onStoreError: 'fail-open',          // 'fail-open', 'fail-closed', 'error', or custom fn (defaults to error bubbling next(err))
     
     // Circuit Breaker Options
     circuitBreaker: true,               // Enable breaker (default: true when options configured)
+    breakerId: 'main-api',              // Optional identifier for metric isolation (smartrate_circuit_breaker_state{breaker="main-api"})
     failureThreshold: 5,                // Consecutive errors to trip breaker (default: 5)
     resetTimeoutMs: 10_000,             // Cooldown duration before canary probe (default: 10,000ms)
     successThreshold: 1,                // Consecutive canary successes to close breaker (default: 1)
     
-    // Algorithm & Identity
+    // Algorithm, Identity & Security
     algorithm: 'token-bucket',          // 'token-bucket' | 'sliding-window' | 'fixed-window'
     capacity: 20,
     refillRate: 5,
     refillIntervalMs: 1000,
-    keyGenerator: (req) => req.headers['x-api-key'] || req.ip
+    keyGenerator: (req) => req.headers['x-api-key'] || req.ip,
+    hashClientIdentifier: true,         // Set true to SHA-256 hash raw API keys/tokens before storage in Redis (default: false)
+    
+    // Observability (v7)
+    metrics: true,                      // Register with defaultMetricsCollector (Prometheus)
+    openTelemetry: true                 // Auto-attach attributes & events to active OpenTelemetry span
   })
 );
 ```
@@ -246,37 +253,51 @@ app.use(
 
 ## Demos & Interactive Scripts
 
-### 1. Production Outage & Resilience Demo (v6)
+### 1. Production Observability Stack (Docker Compose + Grafana + Prometheus) (v7)
+```bash
+# Launch the full containerized stack:
+docker-compose -f examples/observability-stack/docker-compose.yml up -d
+
+# Run the realistic multi-stage traffic generator:
+node examples/observability-stack/simulate-traffic.js
+```
+Automated end-to-end observability stack featuring:
+- **SmartRate Express App**: `http://localhost:3000` with ResilientStore and `/metrics`.
+- **Prometheus Scraper**: `http://localhost:9090` evaluating production alerting rules.
+- **Grafana Dashboard**: `http://localhost:3001` (admin / admin) with live throughput, block rate, latency, and breaker state.
+- **Live Chaos Injection**: Real-time store failure (`POST /api/chaos/break-store`), degraded memory fallback, circuit tripping, and canary probe recovery (`POST /api/chaos/heal-store`).
+
+### 2. Standalone Observability Express Demo (v7)
+```bash
+npm run demo:observability
+# Or: node examples/express-demo/observability-demo.js
+```
+
+### 3. Production Outage & Resilience Demo (v6)
 ```bash
 npm run demo:resilience
 # Or: node examples/express-demo/resilience-demo.js
 ```
-Automated CLI simulation and live Express server showcasing:
-1. Normal operations on primary Redis store (200 OK, non-degraded).
-2. Simulated Redis outage (`ECONNREFUSED` / latency spikes) tripping Circuit Breaker from `CLOSED` $\to$ `OPEN`.
-3. Seamless failover to `ResilientStore` with `RateLimit-Degraded: true` header.
-4. Safe local quota enforcement on fallback MemoryStore (returning 429 when local limit exhausted).
-5. Redis recovery, cooldown expiry, single-flight canary probe in `HALF_OPEN`, and return to `CLOSED`.
 
-### 2. Token Bucket & Burst Control Demo (v5)
+### 4. Token Bucket & Burst Control Demo (v5)
 ```bash
 npm run demo:burst
 # Or: node examples/express-demo/burst-demo.js
 ```
 
-### 3. SaaS Multi-Tier Dynamic Policy Demo (v4)
+### 5. SaaS Multi-Tier Dynamic Policy Demo (v4)
 ```bash
 npm run demo:saas
 # Or: node examples/express-demo/saas-demo.js
 ```
 
-### 4. Fixed vs. Sliding Window Comparison Demo (v3)
+### 6. Fixed vs. Sliding Window Comparison Demo (v3)
 ```bash
 npm run demo:sliding
 # Or: node examples/express-demo/sliding-demo.js
 ```
 
-### 5. Distributed Multi-Instance Redis Demo (v2)
+### 7. Distributed Multi-Instance Redis Demo (v2)
 ```bash
 npm run demo:multi
 # Or: node examples/express-demo/multi-instance.js
@@ -284,7 +305,7 @@ npm run demo:multi
 
 ---
 
-## Verification & Test Catalog (174 Tests)
+## Verification & Test Catalog (251 Tests)
 
 Run the full automated test suite:
 
@@ -293,16 +314,41 @@ npm test
 ```
 
 ```text
-ℹ tests 174
-ℹ suites 77
-ℹ pass 174
+ℹ tests 251
+ℹ suites 98
+ℹ pass 251
 ℹ fail 0
-ℹ duration_ms ~2500ms
+ℹ duration_ms ~2600ms
 ```
 
-### Test Suites Breakdown (174 Tests across 17 Test Files)
+### Test Suites Breakdown (251 Tests across 21 Test Files)
 
-1. **`tests/resilience.resilientStore.test.js`** (24 tests) — **[v6]**
+1. **`tests/telemetry.collector.test.js`** (34 tests) — **[v7]**
+   - Route normalization & cardinality guard (`UUID`, `ULID`, `CUID`, numeric, and hex hash sanitization).
+   - Monotonic counters, instantaneous gauges, cumulative histograms.
+   - RateLimiter telemetry integration and outcome labels (`allowed`, `blocked`).
+   - Degraded requests, fallback error labeling (`store="redis"` on fallback failover).
+   - Multi-breaker metric isolation with `breakerId` (`smartrate_circuit_breaker_state{breaker="auth"}`).
+   - Circuit breaker `stateChange` listener deduplication (zero leaks across 15+ limiters).
+   - `maxSeries` memory bound and `_overflow` route aggregation.
+2. **`tests/telemetry.otel.test.js`** (15 tests) — **[v7]**
+   - `OpenTelemetryBridge` unit semantics and duck-typed active span extraction.
+   - Standard OpenTelemetry semantic conventions (`ratelimit.*`).
+   - Child span creation via `startSpan('smartrate.consume')` and automatic lifecycle cleanup in `finally`.
+   - ResilientStore failure and exception recording on spans.
+   - Verification of production Alertmanager rules (`assets/alerts/prometheus-rules.yml`) and Grafana dashboard (`assets/dashboards/smartrate-grafana-dashboard.json`).
+   - Observability stack configuration files verification.
+3. **`tests/telemetry.prometheus.test.js`** (11 tests) — **[v7]**
+   - Native Prometheus text exposition serializer (`formatPrometheusMetrics`).
+   - Standard HELP and TYPE comments, escaping backslashes and double quotes.
+   - Cumulative histogram buckets (`le`, `+Inf`, `_sum`, `_count`).
+   - Express `/metrics` exporter middleware (`createPrometheusExporter`).
+4. **`tests/keyGenerator.test.js`** (14 tests) — **[v4/v7]**
+   - Identity extraction (API Key, User ID, Multi-Tenant composite keys).
+   - `MAX_IDENTIFIER_LENGTH = 256` clamp protection against memory bloat.
+   - Optional cryptographic SHA-256 hashing via `hashClientIdentifier: true` and custom hashing functions.
+   - Secret token masking in Redis rate limit storage keys.
+5. **`tests/resilience.resilientStore.test.js`** (24 tests) — **[v6]**
    - Dual-Store `ResilientStore` constructor and option validation.
    - Happy-path primary execution without fallback invocation.
    - Transparent failover on infrastructure errors and timeout guard triggers.
@@ -312,54 +358,54 @@ npm test
    - Concurrent request diversion during in-flight canary probe.
    - Seamless traffic recovery to `CLOSED` upon primary healing.
    - Express integration, automatic `RateLimit-Degraded: true` header, and `req.rateLimit` metadata.
-2. **`tests/resilience.circuitBreaker.test.js`** (24 tests) — **[v6]**
+6. **`tests/resilience.circuitBreaker.test.js`** (24 tests) — **[v6]**
    - CircuitBreaker finite state machine (`CLOSED`, `OPEN`, `HALF_OPEN`).
    - Lazy on-demand cooldown evaluation without background timers.
    - Single-flight canary token validation and generation management.
    - Failure classification isolation (network/store errors count; 429 quota exhaustion and route errors do not).
    - Dynamic `Retry-After` derivation on fail-closed 503 responses based on remaining cooldown.
-3. **`tests/resilience.timeout.test.js`** (16 tests) — **[v6]**
+7. **`tests/resilience.timeout.test.js`** (16 tests) — **[v6]**
    - `withTimeout` Promise wrapper with active timer cleanup.
    - `StoreTimeoutError` instantiation and inheritance.
    - Middleware `timeoutMs` option validation.
    - `fail-open` strategy: graceful bypass with `RateLimit-Degraded: true` and `next()`.
    - `fail-closed` strategy: HTTP 503 rejection with `RateLimit-Degraded` and dynamic `Retry-After`.
    - Custom `onStoreError` callback execution and legacy backward-compatible bubbling.
-4. **`tests/tokenBucket.recovery.test.js`** (11 tests) — **[v5]**
+8. **`tests/tokenBucket.recovery.test.js`** (11 tests) — **[v5]**
    - Option C `RateLimit-Reset` semantics in MemoryStore and RedisStore.
    - Multi-instance distributed Token Bucket across separate client and store instances.
    - Full HTTP recovery cycle: `200 OK` (burst) $\to$ `429 Too Many Requests` $\to$ wait `Retry-After` $\to$ `200 OK`.
    - 50-request parallel burst concurrency verification under RedisStore.
-5. **`tests/tokenBucket.memory.test.js`** (16 tests) — **[v4/v5]**
+9. **`tests/tokenBucket.memory.test.js`** (16 tests) — **[v4/v5]**
    - Fail-fast parameter validation for `capacity`, `refillRate`, `refillIntervalMs`.
    - Continuous in-memory refill math and capacity ceiling clamping.
    - Mathematical zero-leak memory sweeper eviction.
-6. **`tests/tokenBucket.redis.test.js`** (10 tests) — **[v4/v5]**
-   - Distributed Redis Token Bucket mechanics and continuous Lua refill math.
-   - Safe sliding activity TTL for storage cleanup.
-   - 50-request parallel concurrency stress test (zero race conditions).
-7. **`tests/rateLimiter.test.js`** (14 tests) — **[v1]**
-   - Option validation, Fixed Window enforcement, IP/route/method isolation.
-8. **`tests/slidingWindow.memory.test.js`** (10 tests) — **[v3]**
-   - In-memory rolling queue mechanics, half-open interval boundaries.
-9. **`tests/redisStore.test.js`** (9 tests) — **[v2]**
-   - RedisStore client injection, eval vs sendCommand fallback.
-10. **`tests/keyGenerator.test.js`** (8 tests) — **[v4]**
-    - Custom identity extraction, multi-tenant composite keys.
-11. **`tests/dynamicPolicy.test.js`** (7 tests) — **[v4]**
+10. **`tests/tokenBucket.redis.test.js`** (10 tests) — **[v4/v5]**
+    - Distributed Redis Token Bucket mechanics and continuous Lua refill math.
+    - Safe sliding activity TTL for storage cleanup.
+    - 50-request parallel concurrency stress test (zero race conditions).
+11. **`tests/rateLimiter.test.js`** (14 tests) — **[v1]**
+    - Option validation, Fixed Window enforcement, IP/route/method isolation.
+12. **`tests/slidingWindow.memory.test.js`** (10 tests) — **[v3]**
+    - In-memory rolling queue mechanics, half-open interval boundaries.
+13. **`tests/redisStore.test.js`** (9 tests) — **[v2]**
+    - RedisStore client injection, eval vs sendCommand fallback.
+14. **`tests/dynamicPolicy.test.js`** (7 tests) — **[v4]**
     - Dynamic per-request capacity, refillRate, cost functions.
-12. **`tests/distributed.test.js`** (5 tests) — **[v3]**
+15. **`tests/distributed.test.js`** (5 tests) — **[v3]**
     - Cross-instance shared state verification across Express instances.
-13. **`tests/slidingWindow.redis.test.js`** (5 tests) — **[v3]**
+16. **`tests/slidingWindow.redis.test.js`** (5 tests) — **[v3]**
     - Redis Sorted Set (ZSET) atomic Lua script execution.
-14. **`tests/memoryStore.test.js`** (5 tests) — **[v1]**
+17. **`tests/memoryStore.test.js`** (5 tests) — **[v1]**
     - Memory store unit tests and cleanup sweepers.
-15. **`tests/concurrency.test.js`** (4 tests) — **[v3]**
+18. **`tests/concurrency.test.js`** (4 tests) — **[v3]**
     - Concurrency tests for Fixed Window and Sliding Window.
-16. **`tests/redis.integration.test.js`** (3 tests) — **[v2]**
+19. **`tests/redis.integration.test.js`** (3 tests) — **[v2]**
     - Redis fixed window TTL and expiration.
-17. **`tests/boundaryBurst.test.js`** (3 tests) — **[v3]**
+20. **`tests/boundaryBurst.test.js`** (3 tests) — **[v3]**
     - Boundary-burst verification (fixed vs sliding window).
+21. **`tests/tokenBucket.concurrency.test.js`** (5 tests) — **[v5]**
+    - Token Bucket concurrency and atomicity under parallel load.
 
 ---
 
@@ -370,18 +416,18 @@ npm test
 * **v3.0.0**: Rolling Sliding Window (`algorithm: 'sliding-window'`) with Redis Sorted Sets (ZSET) and boundary-burst elimination.
 * **v4.0.0**: Custom client identity via `keyGenerator(req)`, dynamic tier-based policies, and weighted request costs.
 * **v5.0.0**: Token Bucket + Controlled Burst rate limiting (`algorithm: 'token-bucket'`), sub-second continuous refill, Option C `RateLimit-Reset`, and HTTP client recovery flow.
-* **v6.0.0 (Current)**:
-  - Store Timeout Guard (`timeoutMs`, `withTimeout`, `StoreTimeoutError`).
-  - Configurable store failure policies (`onStoreError: 'fail-open' | 'fail-closed' | custom`).
-  - Circuit Breaker Engine (`CircuitBreaker`, `CIRCUIT_STATE.CLOSED | OPEN | HALF_OPEN`).
-  - Lazy on-demand cooldown state transitions (no background daemon timers).
-  - Single-flight canary probe with concurrent request diversion.
-  - Dual-store resilience wrapper (`ResilientStore`) with transparent fallback to `MemoryStore`.
-  - Safe local in-memory quota enforcement in degraded mode (preventing downstream server collapse).
-  - Explicit boundaries: zero state backfill/sync upon recovery; cluster per-process local fallback quota semantics ($N \times \text{limit}$).
-  - Observability header tagging (`RateLimit-Degraded: true`) and `req.rateLimit` metadata.
-  - Interactive Production Outage and Resilience Express demo (`npm run demo:resilience`).
-* **v7.0.0 (Planned)**: Prometheus and OpenTelemetry metrics instrumentation.
+* **v6.0.0**: Store Timeout Guard (`timeoutMs`, `withTimeout`), configurable failure policies (`onStoreError`), Circuit Breaker Engine (`CLOSED`, `OPEN`, `HALF_OPEN`), Dual-store resilience wrapper (`ResilientStore`), and local quota enforcement during degradation.
+* **v7.0.0 (Released & Hardened)**:
+  - **Zero-Dependency Native Prometheus Exposition (`/metrics`)**: Serializes counters, gauges, and cumulative histograms strictly adhering to standard Prometheus format without third-party dependencies.
+  - **In-Memory Metrics Engine (`MetricsCollector`)**: High-throughput thread-safe aggregation with strict `maxSeries` memory bound and `_overflow` route aggregation.
+  - **Cardinality Guard & Dynamic Route Sanitization**: Automatically collapses numeric, UUID, ULID, and CUID identifiers into `:id` segments. User IDs and IPs are strictly excluded from metric labels.
+  - **Circuit Breaker Isolation & Listener Safety**: Supports `breakerId` / `id` for isolated gauge metrics (`smartrate_circuit_breaker_state{breaker="..."}`) and deduplicates listeners via WeakMap to prevent EventEmitter leaks.
+  - **ResilientStore Outage Observability**: Automatically increments `smartrate_store_errors_total{store="redis"}` and records span exceptions when primary store operations fail or time out during fallback.
+  - **OpenTelemetry Standard Semantic Conventions**: Enriches spans with `ratelimit.allowed`, `ratelimit.remaining`, `ratelimit.reset`, `ratelimit.algorithm`, `ratelimit.store`, and `ratelimit.degraded`. Creates child spans via `startSpan('smartrate.consume')` when tracer is configured.
+  - **Production Grafana & Prometheus Assets**: Full Alertmanager rules (`assets/alerts/prometheus-rules.yml`) and pre-built Grafana dashboard (`assets/dashboards/smartrate-grafana-dashboard.json`).
+  - **Production Observability Stack**: Complete Docker Compose setup with Prometheus, Grafana, Redis, and SmartRate, paired with an automated multi-stage traffic simulator (`examples/observability-stack/`).
+  - **Security & Identity Hardening**: Defensive clamping of client identifiers to 256 characters (`MAX_IDENTIFIER_LENGTH = 256`) and optional cryptographic SHA-256 hashing (`hashClientIdentifier: true`) to mask raw API tokens in Redis storage.
+  - **Nanosecond Benchmarks**: Realistic, empirical overhead measurement (`npm run benchmark`) using `process.hrtime.bigint()`.
 
 ---
 

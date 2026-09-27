@@ -231,6 +231,89 @@ describe('SmartRate v7 — Day 3: OpenTelemetry Bridge, Alerting Rules & Grafana
       assert.equal(capturedSpan.exceptions.length, 1);
       assert.equal(capturedSpan.exceptions[0].message, 'Connection refused to redis cluster');
     });
+
+    it('creates child span and attaches ratelimit semantic attributes when tracer is supplied', async () => {
+      let createdSpan = null;
+      let ended = false;
+
+      const mockTracer = {
+        startSpan(name, options) {
+          createdSpan = {
+            name,
+            attributes: { ...options?.attributes },
+            events: [],
+            exceptions: [],
+            setAttribute(k, v) { this.attributes[k] = v; },
+            addEvent(name, attrs) { this.events.push({ name, attrs }); },
+            recordException(err) { this.exceptions.push(err); },
+            end() { ended = true; }
+          };
+          return createdSpan;
+        }
+      };
+
+      const bridge = new OpenTelemetryBridge({ tracer: mockTracer });
+      const app = express();
+      const limiter = rateLimiter({
+        limit: 5,
+        windowMs: 60000,
+        openTelemetry: bridge
+      });
+
+      app.get('/child-span-test', limiter, (req, res) => res.json({ ok: true }));
+
+      const res = await request(app).get('/child-span-test');
+      assert.equal(res.status, 200);
+      assert.ok(createdSpan, 'Child span should be created');
+      assert.equal(createdSpan.name, 'smartrate.consume');
+      assert.equal(createdSpan.attributes['ratelimit.allowed'], true);
+      assert.equal(createdSpan.attributes['ratelimit.remaining'], 4);
+      assert.equal(createdSpan.attributes['ratelimit.algorithm'], 'fixed-window');
+      assert.equal(createdSpan.attributes['ratelimit.degraded'], false);
+      assert.equal(ended, true, 'Child span should be ended in finally');
+    });
+
+    it('attaches store error to span when ResilientStore falls back to secondary store', async () => {
+      let capturedSpan = null;
+      const failingPrimary = {
+        name: 'redis',
+        consume: async () => {
+          throw new Error('Redis cluster unreachable');
+        }
+      };
+
+      const app = express();
+      const limiter = rateLimiter({
+        limit: 5,
+        windowMs: 60000,
+        store: failingPrimary,
+        fallbackStore: true,
+        openTelemetry: true
+      });
+
+      app.use((req, res, next) => {
+        capturedSpan = {
+          attributes: {},
+          events: [],
+          exceptions: [],
+          setAttribute(k, v) { this.attributes[k] = v; },
+          addEvent(name, attrs) { this.events.push({ name, attrs }); },
+          recordException(err) { this.exceptions.push(err); }
+        };
+        req.span = capturedSpan;
+        next();
+      });
+
+      app.get('/resilient-span-test', limiter, (req, res) => res.json({ ok: true }));
+
+      const res = await request(app).get('/resilient-span-test');
+      assert.equal(res.status, 200);
+      assert.equal(res.headers['ratelimit-degraded'], 'true');
+      assert.equal(capturedSpan.attributes['ratelimit.store_error'], true);
+      assert.equal(capturedSpan.attributes['ratelimit.degraded'], true);
+      assert.equal(capturedSpan.exceptions.length, 1);
+      assert.equal(capturedSpan.exceptions[0].message, 'Redis cluster unreachable');
+    });
   });
 
   describe('3. Production Alerting Rules & Grafana Dashboard Asset Verification', () => {
@@ -287,6 +370,17 @@ describe('SmartRate v7 — Day 3: OpenTelemetry Bridge, Alerting Rules & Grafana
       assert.ok(panelTitles.some((t) => t.includes('Store Operation Latency')));
       assert.ok(panelTitles.some((t) => t.includes('Store Errors')));
       assert.ok(panelTitles.some((t) => t.includes('Route Traffic Breakdown')));
+    });
+
+    it('verifies observability stack demo files exist and are valid', () => {
+      const stackDir = path.resolve('examples/observability-stack');
+      assert.ok(fs.existsSync(stackDir), 'observability-stack directory must exist');
+      assert.ok(fs.existsSync(path.join(stackDir, 'docker-compose.yml')));
+      assert.ok(fs.existsSync(path.join(stackDir, 'prometheus.yml')));
+      assert.ok(fs.existsSync(path.join(stackDir, 'Dockerfile')));
+      assert.ok(fs.existsSync(path.join(stackDir, 'server.js')));
+      assert.ok(fs.existsSync(path.join(stackDir, 'simulate-traffic.js')));
+      assert.ok(fs.existsSync(path.join(stackDir, 'README.md')));
     });
   });
 });

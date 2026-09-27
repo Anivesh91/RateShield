@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: smartrate-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  app:
+    build:
+      context: ../..
+      dockerfile: examples/observability-stack/Dockerfile
+    container_name: smartrate-app
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: smartrate-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../assets/alerts/prometheus-rules.yml:/etc/prometheus/prometheus-rules.yml:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: smartrate-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../../assets/dashboards/smartrate-grafana-dashboard.json:/var/lib/grafana/dashboards/smartrate-grafana-dashboard.json:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped

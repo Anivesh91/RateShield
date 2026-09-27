@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import request from 'supertest';
-import { rateLimiter, MemoryStore, RedisStore } from '../src/index.js';
+import { rateLimiter, MemoryStore, RedisStore, buildRateLimitKey, MAX_IDENTIFIER_LENGTH } from '../src/index.js';
 
 function createTestApp() {
   const app = express();
@@ -347,6 +347,106 @@ describe('SmartRate v4 — Custom Key Generator & Multi-Tenant Keys', () => {
       const resB = await request(app).get('/api/redis-custom-key').set('X-Client-ID', clientB);
       assert.equal(resB.status, 200);
       assert.equal(resB.headers['ratelimit-remaining'], '1');
+    });
+  });
+
+  describe('Security & Pathological Protection (Key Hashing & Max Length Bound)', () => {
+    it('preserves plain raw keys by default for backwards compatibility', () => {
+      const key = buildRateLimitKey({
+        algorithm: 'token-bucket',
+        method: 'POST',
+        route: '/api/checkout',
+        clientIdentifier: 'user_12345'
+      });
+      assert.equal(key, 'smartrate:token-bucket:POST:/api/checkout:user_12345');
+    });
+
+    it('clamps pathological client identifiers to MAX_IDENTIFIER_LENGTH (256)', () => {
+      assert.equal(MAX_IDENTIFIER_LENGTH, 256);
+      const hugeId = 'x'.repeat(10_000);
+      const key = buildRateLimitKey({
+        method: 'GET',
+        route: '/test',
+        clientIdentifier: hugeId
+      });
+      const parts = key.split(':');
+      const storedId = parts[parts.length - 1];
+      assert.equal(storedId.length, 256);
+      assert.equal(storedId, 'x'.repeat(256));
+    });
+
+    it('hashes sensitive identifiers using SHA-256 when hashClientIdentifier: true', () => {
+      const secretApiKey = 'live_sk_secret_99887766554433221100';
+      const key = buildRateLimitKey({
+        algorithm: 'fixed-window',
+        method: 'GET',
+        route: '/api/v1/data',
+        clientIdentifier: secretApiKey,
+        hashClientIdentifier: true
+      });
+
+      // Does not contain raw secret API key
+      assert.equal(key.includes(secretApiKey), false);
+      // Key contains 64-character hex SHA-256 digest
+      const keyParts = key.split(':');
+      const hashDigest = keyParts[keyParts.length - 1];
+      assert.equal(hashDigest.length, 64);
+      assert.match(hashDigest, /^[0-9a-f]{64}$/);
+    });
+
+    it('supports custom hash functions when passed to hashClientIdentifier', () => {
+      const customHasher = (id) => `custom_${id.substring(0, 5)}`;
+      const key = buildRateLimitKey({
+        method: 'GET',
+        route: '/custom',
+        clientIdentifier: 'my-sensitive-token',
+        hashClientIdentifier: customHasher
+      });
+      assert.equal(key, 'smartrate:GET:/custom:custom_my-se');
+    });
+
+    it('validates hashClientIdentifier option in rateLimiter fail-fast', () => {
+      assert.throws(
+        () => rateLimiter({ limit: 5, windowMs: 1000, hashClientIdentifier: 'invalid' }),
+        /SmartRate: 'hashClientIdentifier' must be a boolean or a hash function/
+      );
+    });
+
+    it('enforces rate limits in Express without exposing sensitive API keys in storage', async () => {
+      const store = new MemoryStore();
+      const app = createTestApp();
+      app.get(
+        '/api/secure-vault',
+        rateLimiter({
+          limit: 2,
+          windowMs: 60_000,
+          store,
+          hashClientIdentifier: true,
+          keyGenerator: (req) => req.headers['authorization']
+        }),
+        (req, res) => res.json({ ok: true })
+      );
+
+      const secretTokenA = 'Bearer secret-jwt-token-alpha';
+      const secretTokenB = 'Bearer secret-jwt-token-beta';
+
+      // Request 1 & 2 for Token A succeed
+      assert.equal((await request(app).get('/api/secure-vault').set('Authorization', secretTokenA)).status, 200);
+      assert.equal((await request(app).get('/api/secure-vault').set('Authorization', secretTokenA)).status, 200);
+
+      // Request 3 for Token A blocked (429)
+      const blockedRes = await request(app).get('/api/secure-vault').set('Authorization', secretTokenA);
+      assert.equal(blockedRes.status, 429);
+
+      // Token B still has full fresh quota
+      const resB = await request(app).get('/api/secure-vault').set('Authorization', secretTokenB);
+      assert.equal(resB.status, 200);
+
+      // Verify that NO key in the store contains the literal raw secret tokens
+      for (const key of store.store.keys()) {
+        assert.equal(key.includes(secretTokenA), false, `Key ${key} must not contain raw secret token`);
+        assert.equal(key.includes(secretTokenB), false, `Key ${key} must not contain raw secret token`);
+      }
     });
   });
 });

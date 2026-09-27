@@ -63,7 +63,7 @@ With Metrics + OTel:   [ 0.30 µs ] + [ 11.40 µs ]
 - **Token Bucket (`2.60 µs` p50):**  
   Uses an atomic timestamp and token float math calculation on each request. It does not iterate over arrays or allocate dynamic structures per request once initialized.
 - **Sliding Window (`3.70 µs` p50):**  
-  Maintains in-memory circular timestamp buffers with rolling boundary eviction.
+  Maintains an in-memory chronological timestamp array with rolling window eviction of expired timestamps (`shift` past `now - windowMs`).
 - **Route Normalization (`< 1 µs`):**  
   Leverages Express's internal route pattern table (`req.baseUrl + req.route.path`), avoiding regex evaluation for standard matched routes.
 
@@ -115,11 +115,13 @@ Uncontrolled Prometheus label cardinality is a common cause of production memory
 SmartRate enforces strict label hygiene:
 
 1. **Never Label User IDs or IPs:**  
-   Client identifiers (`req.ip`, API Keys, JWT sub) are hashed into the rate limit storage key, but **never** placed into Prometheus metric labels.
+   Client identifiers (`req.ip`, API Keys, JWT sub) are defensive-clamped to 256 characters (with optional SHA-256 cryptographic hashing via `hashClientIdentifier: true`) and are **strictly excluded** from Prometheus metric labels to prevent label explosion.
 2. **Normalized Routes:**  
-   `/users/98231` and `/users/44120` both collapse to `/users/:id`. The cardinality of `smartrate_requests_total` is bounded by `routes × methods × outcomes × stores` (typically < 200 metric series total).
+   `/users/98231`, `/users/44120`, and `/orders/01ARZ3NDEKTSV4RRFFQ69G5FAV` all collapse to `/users/:id` or `/orders/:id` (handling UUIDs, ULIDs, CUIDs, and numeric IDs). The cardinality of `smartrate_requests_total` is bounded by `routes × methods × outcomes × stores` (typically < 200 metric series total).
 3. **Bounded Histogram Buckets:**  
    Default buckets are capped at 11 fixed thresholds calibrated for microsecond-to-second store latencies.
+4. **Hard Memory Series Bound (`maxSeries`):**  
+   The `MetricsCollector` enforces a hard bound (default: 1,000 series per metric). Excess dynamic routes are collapsed into a designated `_overflow` bucket, completely preventing out-of-memory crashes under route fuzzing attacks.
 
 ---
 

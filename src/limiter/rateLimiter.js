@@ -10,6 +10,7 @@ import { MetricsCollector, defaultMetricsCollector } from '../telemetry/metricsC
 import { OpenTelemetryBridge } from '../telemetry/openTelemetryBridge.js';
 
 const defaultMemoryStore = new MemoryStore();
+const attachedBreakerCollectors = new WeakMap();
 
 /**
  * Scans the default in-memory store and evicts expired records.
@@ -50,8 +51,22 @@ function validateOptions(options) {
     metrics,
     metricsCollector,
     routeNormalizer,
-    openTelemetry
+    openTelemetry,
+    hashClientIdentifier,
+    breakerId
   } = options;
+
+  if (breakerId !== undefined && (typeof breakerId !== 'string' || breakerId.trim().length === 0)) {
+    throw new TypeError("SmartRate: 'breakerId' must be a non-empty string.");
+  }
+
+  if (
+    hashClientIdentifier !== undefined &&
+    typeof hashClientIdentifier !== 'boolean' &&
+    typeof hashClientIdentifier !== 'function'
+  ) {
+    throw new TypeError("SmartRate: 'hashClientIdentifier' must be a boolean or a hash function.");
+  }
 
   if (openTelemetry !== undefined) {
     if (
@@ -264,7 +279,9 @@ export function rateLimiter(options = {}) {
     metrics,
     metricsCollector,
     routeNormalizer,
-    openTelemetry
+    openTelemetry,
+    hashClientIdentifier = false,
+    breakerId
   } = options;
   const algorithm = options.algorithm || 'fixed-window';
   let store = options.store || defaultMemoryStore;
@@ -312,21 +329,41 @@ export function rateLimiter(options = {}) {
     breaker = store.circuitBreaker;
   }
 
+  const activeBreakerId =
+    breakerId ||
+    breaker?.id ||
+    (typeof circuitBreaker === 'object' && circuitBreaker?.id ? circuitBreaker.id : null) ||
+    null;
+
+  if (breaker && activeBreakerId && !breaker.id) {
+    breaker.id = activeBreakerId;
+  }
+
   if (collector && breaker) {
-    const recordCircuitBreakerState = (state) => {
-      try {
-        if (typeof collector.recordCircuitBreakerState === 'function') {
-          collector.recordCircuitBreakerState(state);
+    let collectorsForBreaker = attachedBreakerCollectors.get(breaker);
+    if (!collectorsForBreaker) {
+      collectorsForBreaker = new Set();
+      attachedBreakerCollectors.set(breaker, collectorsForBreaker);
+    }
+
+    if (!collectorsForBreaker.has(collector)) {
+      collectorsForBreaker.add(collector);
+      const breakerLabels = activeBreakerId ? { breaker: activeBreakerId } : {};
+      const recordCircuitBreakerState = (state) => {
+        try {
+          if (typeof collector.recordCircuitBreakerState === 'function') {
+            collector.recordCircuitBreakerState(state, breakerLabels);
+          }
+        } catch {
+          // Safe telemetry
         }
+      };
+      breaker.on('stateChange', (evt) => recordCircuitBreakerState(evt.to));
+      try {
+        recordCircuitBreakerState(breaker.getState());
       } catch {
         // Safe telemetry
       }
-    };
-    breaker.on('stateChange', (evt) => recordCircuitBreakerState(evt.to));
-    try {
-      recordCircuitBreakerState(breaker.getState());
-    } catch {
-      // Safe telemetry
     }
   }
 
@@ -341,6 +378,19 @@ export function rateLimiter(options = {}) {
   };
 
   const rateLimiterMiddleware = async function rateLimiterMiddleware(req, res, next) {
+    let childSpan = null;
+    if (otelBridge && typeof otelBridge.startSpan === 'function') {
+      childSpan = otelBridge.startSpan('smartrate.consume', {
+        attributes: {
+          'smartrate.algorithm': algorithm,
+          'ratelimit.algorithm': algorithm
+        }
+      });
+      if (childSpan) {
+        req._smartRateSpan = childSpan;
+      }
+    }
+
     try {
       const rawIdentifier = await keyGenerator(req);
       const clientIdentifier = (rawIdentifier !== undefined && rawIdentifier !== null && String(rawIdentifier).trim().length > 0)
@@ -353,12 +403,17 @@ export function rateLimiter(options = {}) {
       const defaultStoreLabel = isResilient
         ? 'resilient'
         : (store instanceof RedisStore ? 'redis' : (store instanceof MemoryStore ? 'memory' : 'custom'));
+      const primaryStore = isResilient ? store.primaryStore : store;
+      const primaryStoreLabel = primaryStore instanceof RedisStore
+        ? 'redis'
+        : (primaryStore instanceof MemoryStore ? 'memory' : (primaryStore?.name || 'primary'));
 
       const key = buildRateLimitKey({
         algorithm,
         method,
         route: routeKey,
-        clientIdentifier
+        clientIdentifier,
+        hashClientIdentifier
       });
 
       // 1. Resolve dynamic limit & windowMs
@@ -563,6 +618,20 @@ export function rateLimiter(options = {}) {
             collector.recordDegradedRequest({
               reason: result.primaryError?.name || 'fallback'
             });
+
+            if (result.primaryError) {
+              const errorType =
+                result.primaryError instanceof StoreTimeoutError
+                  ? 'timeout'
+                  : result.primaryError instanceof CircuitBreakerOpenError
+                    ? 'circuit_open'
+                    : (result.primaryError?.code === 'ECONNREFUSED' ? 'econnrefused' : 'store_error');
+
+              collector.recordStoreError({
+                store: primaryStoreLabel,
+                error_type: errorType
+              });
+            }
           }
           const activeStore = result.store || (result.fallbackUsed ? 'fallback' : defaultStoreLabel);
           collector.recordRequest({
@@ -577,6 +646,13 @@ export function rateLimiter(options = {}) {
 
       if (otelBridge) {
         safeTelemetry(() => {
+          if (result.degraded && result.primaryError) {
+            otelBridge.recordStoreError({
+              req,
+              storeError: result.primaryError,
+              store: primaryStoreLabel
+            });
+          }
           const activeStore = result.store || (result.fallbackUsed ? 'fallback' : defaultStoreLabel);
           otelBridge.recordEvaluation({
             req,
@@ -608,6 +684,14 @@ export function rateLimiter(options = {}) {
       });
     } catch (err) {
       return next(err);
+    } finally {
+      if (childSpan && typeof childSpan.end === 'function') {
+        try {
+          childSpan.end();
+        } catch {
+          // Safe boundary
+        }
+      }
     }
   };
 
