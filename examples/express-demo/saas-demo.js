@@ -3,7 +3,7 @@ import express from 'express';
 import { rateLimiter, MemoryStore } from '../../src/index.js';
 
 const app = express();
-const PORT = Number(process.env.SAAS_DEMO_PORT || 3003);
+const PORT = Number(process.env.SAAS_DEMO_PORT || 3005);
 
 app.set('trust proxy', true);
 app.use(express.json());

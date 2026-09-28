@@ -72,7 +72,12 @@ const server = app.listen(PORT, async () => {
   console.log(`=============================================================\n`);
 
   // Run automated demonstration simulation
-  await runSimulation();
+  try {
+    await runSimulation();
+  } catch (error) {
+    console.error('Simulation failed:', error);
+    server.close(() => process.exit(1));
+  }
 });
 
 async function makeRequest(path) {

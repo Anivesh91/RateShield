@@ -27,20 +27,21 @@ await redisClient.connect();
 const loginHandler = (req, res) => res.json({ success: true });
 
 // 1. Resilient Distributed Rate Limiter with In-Memory Fallback & Telemetry
-app.use(
-  '/api',
-  rateLimiter({
-    store: new RedisStore({ client: redisClient }),
-    fallbackStore: true,         // Automatically wraps in ResilientStore with MemoryStore fallback
-    timeoutMs: 250,              // Store operation timeout guard in milliseconds
-    failureThreshold: 5,         // Trip circuit breaker to OPEN after 5 consecutive failures
-    resetTimeoutMs: 10_000,      // Cooldown window before lazy HALF_OPEN canary probe
-    limit: 100,
-    windowMs: 60_000,
-    metrics: true,               // Enable Prometheus telemetry collection
-    openTelemetry: true          // Attach attributes & events to active OpenTelemetry span
-  })
-);
+const generalApiLimiter = rateLimiter({
+  store: new RedisStore({ client: redisClient }),
+  fallbackStore: true,         // Automatically wraps in ResilientStore with MemoryStore fallback
+  timeoutMs: 250,              // Store operation timeout guard in milliseconds
+  failureThreshold: 5,         // Trip circuit breaker to OPEN after 5 consecutive failures
+  resetTimeoutMs: 10_000,      // Cooldown window before lazy HALF_OPEN canary probe
+  limit: 100,
+  windowMs: 60_000,
+  metrics: true,               // Enable Prometheus telemetry collection
+  openTelemetry: true          // Attach attributes & events to active OpenTelemetry span
+});
+app.use('/api', (req, res, next) => {
+  if (req.path === '/burst') return next();
+  return generalApiLimiter(req, res, next);
+});
 
 // 2. Token Bucket + Controlled Burst: Allows 20-request bursts, sustained 5 req/sec
 app.use(
@@ -305,7 +306,7 @@ npm run demo:multi
 
 ---
 
-## Verification & Test Catalog (251 Tests)
+## Verification & Test Catalog (253 Tests)
 
 Run the full automated test suite:
 
@@ -314,14 +315,14 @@ npm test
 ```
 
 ```text
-ℹ tests 251
+ℹ tests 253
 ℹ suites 98
-ℹ pass 251
+ℹ pass 253
 ℹ fail 0
-ℹ duration_ms ~2600ms
+ℹ duration_ms ~3400ms
 ```
 
-### Test Suites Breakdown (251 Tests across 21 Test Files)
+### Test Suites Breakdown (253 Tests across 21 Test Files)
 
 1. **`tests/telemetry.collector.test.js`** (34 tests) — **[v7]**
    - Route normalization & cardinality guard (`UUID`, `ULID`, `CUID`, numeric, and hex hash sanitization).
@@ -330,7 +331,7 @@ npm test
    - Degraded requests, fallback error labeling (`store="redis"` on fallback failover).
    - Multi-breaker metric isolation with `breakerId` (`smartrate_circuit_breaker_state{breaker="auth"}`).
    - Circuit breaker `stateChange` listener deduplication (zero leaks across 15+ limiters).
-   - `maxSeries` memory bound and `_overflow` route aggregation.
+   - `maxSeries` memory bound and strict series cap enforcement.
 2. **`tests/telemetry.otel.test.js`** (15 tests) — **[v7]**
    - `OpenTelemetryBridge` unit semantics and duck-typed active span extraction.
    - Standard OpenTelemetry semantic conventions (`ratelimit.*`).
@@ -338,7 +339,7 @@ npm test
    - ResilientStore failure and exception recording on spans.
    - Verification of production Alertmanager rules (`assets/alerts/prometheus-rules.yml`) and Grafana dashboard (`assets/dashboards/smartrate-grafana-dashboard.json`).
    - Observability stack configuration files verification.
-3. **`tests/telemetry.prometheus.test.js`** (11 tests) — **[v7]**
+3. **`tests/telemetry.prometheus.test.js`** (13 tests) — **[v7]**
    - Native Prometheus text exposition serializer (`formatPrometheusMetrics`).
    - Standard HELP and TYPE comments, escaping backslashes and double quotes.
    - Cumulative histogram buckets (`le`, `+Inf`, `_sum`, `_count`).
@@ -347,8 +348,9 @@ npm test
    - Identity extraction (API Key, User ID, Multi-Tenant composite keys).
    - `MAX_IDENTIFIER_LENGTH = 256` clamp protection against memory bloat.
    - Optional cryptographic SHA-256 hashing via `hashClientIdentifier: true` and custom hashing functions.
+   - Collision-free hashing for pathological client identifiers.
    - Secret token masking in Redis rate limit storage keys.
-5. **`tests/resilience.resilientStore.test.js`** (24 tests) — **[v6]**
+5. **`tests/resilience.resilientStore.test.js`** (25 tests) — **[v6]**
    - Dual-Store `ResilientStore` constructor and option validation.
    - Happy-path primary execution without fallback invocation.
    - Transparent failover on infrastructure errors and timeout guard triggers.
@@ -358,13 +360,13 @@ npm test
    - Concurrent request diversion during in-flight canary probe.
    - Seamless traffic recovery to `CLOSED` upon primary healing.
    - Express integration, automatic `RateLimit-Degraded: true` header, and `req.rateLimit` metadata.
-6. **`tests/resilience.circuitBreaker.test.js`** (24 tests) — **[v6]**
+6. **`tests/resilience.circuitBreaker.test.js`** (25 tests) — **[v6]**
    - CircuitBreaker finite state machine (`CLOSED`, `OPEN`, `HALF_OPEN`).
    - Lazy on-demand cooldown evaluation without background timers.
    - Single-flight canary token validation and generation management.
    - Failure classification isolation (network/store errors count; 429 quota exhaustion and route errors do not).
    - Dynamic `Retry-After` derivation on fail-closed 503 responses based on remaining cooldown.
-7. **`tests/resilience.timeout.test.js`** (16 tests) — **[v6]**
+7. **`tests/resilience.timeout.test.js`** (18 tests) — **[v6]**
    - `withTimeout` Promise wrapper with active timer cleanup.
    - `StoreTimeoutError` instantiation and inheritance.
    - Middleware `timeoutMs` option validation.
@@ -376,8 +378,9 @@ npm test
    - Multi-instance distributed Token Bucket across separate client and store instances.
    - Full HTTP recovery cycle: `200 OK` (burst) $\to$ `429 Too Many Requests` $\to$ wait `Retry-After` $\to$ `200 OK`.
    - 50-request parallel burst concurrency verification under RedisStore.
-9. **`tests/tokenBucket.memory.test.js`** (16 tests) — **[v4/v5]**
+9. **`tests/tokenBucket.memory.test.js`** (17 tests) — **[v4/v5]**
    - Fail-fast parameter validation for `capacity`, `refillRate`, `refillIntervalMs`.
+   - Derived omitted `refillRate` using configured refill intervals.
    - Continuous in-memory refill math and capacity ceiling clamping.
    - Mathematical zero-leak memory sweeper eviction.
 10. **`tests/tokenBucket.redis.test.js`** (10 tests) — **[v4/v5]**
@@ -392,20 +395,21 @@ npm test
     - RedisStore client injection, eval vs sendCommand fallback.
 14. **`tests/dynamicPolicy.test.js`** (7 tests) — **[v4]**
     - Dynamic per-request capacity, refillRate, cost functions.
-15. **`tests/distributed.test.js`** (5 tests) — **[v3]**
+15. **`tests/benchmark.test.js`** (6 tests) — **[v7]**
+    - Overhead microbenchmarks across scenarios (no-op, MemoryStore, RedisStore, ResilientStore).
+    - Zero warmup handling and benchmark reporting.
+16. **`tests/distributed.test.js`** (5 tests) — **[v3]**
     - Cross-instance shared state verification across Express instances.
-16. **`tests/slidingWindow.redis.test.js`** (5 tests) — **[v3]**
+17. **`tests/slidingWindow.redis.test.js`** (5 tests) — **[v3]**
     - Redis Sorted Set (ZSET) atomic Lua script execution.
-17. **`tests/memoryStore.test.js`** (5 tests) — **[v1]**
+18. **`tests/memoryStore.test.js`** (5 tests) — **[v1]**
     - Memory store unit tests and cleanup sweepers.
-18. **`tests/concurrency.test.js`** (4 tests) — **[v3]**
+19. **`tests/concurrency.test.js`** (4 tests) — **[v3]**
     - Concurrency tests for Fixed Window and Sliding Window.
-19. **`tests/redis.integration.test.js`** (3 tests) — **[v2]**
+20. **`tests/redis.integration.test.js`** (3 tests) — **[v2]**
     - Redis fixed window TTL and expiration.
-20. **`tests/boundaryBurst.test.js`** (3 tests) — **[v3]**
+21. **`tests/boundaryBurst.test.js`** (3 tests) — **[v3]**
     - Boundary-burst verification (fixed vs sliding window).
-21. **`tests/tokenBucket.concurrency.test.js`** (5 tests) — **[v5]**
-    - Token Bucket concurrency and atomicity under parallel load.
 
 ---
 

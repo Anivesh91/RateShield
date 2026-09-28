@@ -161,7 +161,12 @@ const server = app.listen(PORT, async () => {
   console.log(`⚙️  CircuitBreaker: failureThreshold = 3, resetTimeout = 1200ms, timeoutGuard = 100ms`);
   console.log(`=============================================================\n`);
 
-  await runSimulation();
+  try {
+    await runSimulation();
+  } catch (error) {
+    console.error('Simulation failed:', error);
+    server.close(() => process.exit(1));
+  }
 });
 
 async function makeRequest(path) {

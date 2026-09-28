@@ -47,7 +47,7 @@ export class MemoryStore {
     }
     if (algorithm === 'token-bucket') {
       const resolvedCapacity = capacity ?? limit;
-      const resolvedRefillRate = refillRate ?? (limit && windowMs ? limit / (windowMs / 1000) : 1);
+      const resolvedRefillRate = refillRate ?? (limit && windowMs ? limit * refillIntervalMs / windowMs : 1);
       return this._consumeTokenBucket({
         key,
         capacity: resolvedCapacity,

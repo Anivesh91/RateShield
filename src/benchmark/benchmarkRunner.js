@@ -127,7 +127,7 @@ function createMockHttpPair(ip = '192.168.1.1', path = '/api/resource', method =
  */
 export async function runBenchmark(options = {}) {
   const iterations = options.iterations || 10000;
-  const warmup = options.warmup || 1000;
+  const warmup = options.warmup ?? 1000;
 
   // Next function stub
   const nextStub = () => {};

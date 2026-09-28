@@ -140,6 +140,26 @@ describe('SmartRate v4 — Memory Token Bucket Unit & Integration Tests', () => 
   });
 
   describe('MemoryStore Token Bucket Unit Semantics', () => {
+    it('derives omitted refillRate in tokens per configured interval', () => {
+      const store = new MemoryStore();
+      const key = 'tb:derived-interval:test';
+      const t0 = 100_000;
+      const options = {
+        key,
+        limit: 10,
+        windowMs: 5000,
+        refillIntervalMs: 2000,
+        algorithm: 'token-bucket',
+        now: t0
+      };
+
+      for (let i = 0; i < 10; i++) {
+        assert.equal(store.consume(options).allowed, true);
+      }
+      assert.equal(store.consume(options).allowed, false);
+      assert.equal(store.consume({ ...options, now: t0 + 500 }).allowed, true);
+    });
+
     it('allows initial burst up to configured capacity and blocks on empty bucket', () => {
       const store = new MemoryStore();
       const key = 'tb:burst:test';

@@ -567,21 +567,18 @@ describe('SmartRate v7 — Day 1: Telemetry Foundation & MetricsCollector', () =
       );
     });
 
-    it('enforces maxSeries cardinality bound by collapsing overflow routes into _overflow', () => {
+    it('enforces maxSeries as a strict cap including overflow routes', () => {
       const collector = new MetricsCollector({ maxSeries: 2 });
 
       collector.recordRequest({ outcome: 'allowed', normalized_route: '/route1' });
       collector.recordRequest({ outcome: 'allowed', normalized_route: '/route2' });
-      // 3rd route exceeds maxSeries (2), should be directed to _overflow
+      // No additional series, including _overflow, may exceed the cap.
       collector.recordRequest({ outcome: 'allowed', normalized_route: '/route3' });
       collector.recordRequest({ outcome: 'allowed', normalized_route: '/route4' });
 
       const snapshot = collector.getSnapshot();
       const records = snapshot.counters[METRIC_NAMES.REQUESTS_TOTAL];
-      assert.equal(records.length, 3); // route1, route2, and _overflow
-      const overflowRecord = records.find((r) => r.labels.normalized_route === '_overflow');
-      assert.ok(overflowRecord, 'Must have an _overflow series');
-      assert.equal(overflowRecord.value, 2);
+      assert.equal(records.length, 2);
     });
 
     it('records store error when ResilientStore primary store fails and falls back to memory', async () => {

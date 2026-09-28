@@ -25,15 +25,19 @@ export function buildRateLimitKey({
     ? String(clientIdentifier).trim()
     : '127.0.0.1';
 
-  // Defensive length bounding against memory bloat attacks
-  const boundedId = rawId.length > MAX_IDENTIFIER_LENGTH ? rawId.slice(0, MAX_IDENTIFIER_LENGTH) : rawId;
-
-  // Optional cryptographic hashing
-  let cleanId = boundedId;
+  let cleanId;
   if (hashClientIdentifier === true) {
-    cleanId = crypto.createHash('sha256').update(boundedId).digest('hex');
+    cleanId = crypto.createHash('sha256').update(rawId).digest('hex');
   } else if (typeof hashClientIdentifier === 'function') {
-    cleanId = String(hashClientIdentifier(boundedId) || boundedId);
+    cleanId = String(hashClientIdentifier(rawId) || rawId);
+    if (cleanId.length > MAX_IDENTIFIER_LENGTH) {
+      const digest = crypto.createHash('sha256').update(rawId).digest('hex');
+      cleanId = `${cleanId.slice(0, MAX_IDENTIFIER_LENGTH - digest.length - 1)}:${digest}`;
+    }
+  } else if (rawId.length > MAX_IDENTIFIER_LENGTH) {
+    cleanId = crypto.createHash('sha256').update(rawId).digest('hex');
+  } else {
+    cleanId = rawId;
   }
 
   if (algorithm && algorithm !== 'fixed-window') {

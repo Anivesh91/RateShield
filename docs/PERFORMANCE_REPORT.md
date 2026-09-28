@@ -64,7 +64,7 @@ With Metrics + OTel:   [ 0.30 µs ] + [ 11.40 µs ]
   Uses an atomic timestamp and token float math calculation on each request. It does not iterate over arrays or allocate dynamic structures per request once initialized.
 - **Sliding Window (`3.70 µs` p50):**  
   Maintains an in-memory chronological timestamp array with rolling window eviction of expired timestamps (`shift` past `now - windowMs`).
-- **Route Normalization (`< 1 µs`):**  
+- **Route Normalization:**
   Leverages Express's internal route pattern table (`req.baseUrl + req.route.path`), avoiding regex evaluation for standard matched routes.
 
 ### Metrics-Enabled Scenario (`15.90 µs` p50)

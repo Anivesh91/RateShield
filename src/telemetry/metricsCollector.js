@@ -72,7 +72,7 @@ export class MetricsCollector {
           if (labels && labels.normalized_route) {
             targetLabels = { ...labels, normalized_route: '_overflow' };
             labelKey = serializeLabelKey(targetLabels);
-            if (!metricMap.has(labelKey) && metricMap.size > this.maxSeries) {
+            if (!metricMap.has(labelKey) && metricMap.size >= this.maxSeries) {
               return;
             }
           } else {

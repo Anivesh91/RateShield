@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import os from 'node:os';
 import { runBenchmark } from '../src/benchmark/benchmarkRunner.js';
 
 async function main() {
@@ -7,7 +8,7 @@ async function main() {
   console.log('================================================================================');
   console.log(`Node.js:  ${process.version}`);
   console.log(`Platform: ${process.platform} (${process.arch})`);
-  console.log(`CPUs:     ${process.env.NUMBER_OF_PROCESSORS || '1'} logical cores`);
+  console.log(`CPUs:     ${os.cpus().length} logical cores`);
   console.log('Warmup:   1,000 requests per scenario');
   console.log('Samples:  10,000 requests per scenario');
   console.log('Clock:    process.hrtime.bigint() (nanosecond resolution)\n');

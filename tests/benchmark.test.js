@@ -75,6 +75,11 @@ describe('SmartRate v7 — Day 4: Performance Benchmarking & Observability Demo'
       assert.ok(report.scenarios[0].scenario.includes('No-op Middleware'));
       assert.equal(report.scenarios[0].overheadP50Us, 0);
     });
+
+    it('preserves an explicit zero warmup count', async () => {
+      const report = await runBenchmark({ iterations: 1, warmup: 0 });
+      assert.equal(report.warmup, 0);
+    });
   });
 
   describe('3. Observability Demo Express Application', () => {

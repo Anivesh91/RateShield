@@ -361,18 +361,41 @@ describe('SmartRate v4 — Custom Key Generator & Multi-Tenant Keys', () => {
       assert.equal(key, 'smartrate:token-bucket:POST:/api/checkout:user_12345');
     });
 
-    it('clamps pathological client identifiers to MAX_IDENTIFIER_LENGTH (256)', () => {
+    it('hashes pathological identifiers without collisions from truncation', () => {
       assert.equal(MAX_IDENTIFIER_LENGTH, 256);
       const hugeId = 'x'.repeat(10_000);
+      const otherHugeId = `${'x'.repeat(9_999)}y`;
       const key = buildRateLimitKey({
         method: 'GET',
         route: '/test',
         clientIdentifier: hugeId
       });
-      const parts = key.split(':');
-      const storedId = parts[parts.length - 1];
-      assert.equal(storedId.length, 256);
-      assert.equal(storedId, 'x'.repeat(256));
+      const otherKey = buildRateLimitKey({
+        method: 'GET',
+        route: '/test',
+        clientIdentifier: otherHugeId
+      });
+      const storedId = key.split(':').at(-1);
+      assert.equal(storedId.length, 64);
+      assert.match(storedId, /^[0-9a-f]{64}$/);
+      assert.notEqual(key, otherKey);
+      assert.ok(key.length <= 'smartrate:GET:/test:'.length + MAX_IDENTIFIER_LENGTH);
+
+      const customHasher = () => 'z'.repeat(10_000);
+      const customKey = buildRateLimitKey({
+        method: 'GET',
+        route: '/test',
+        clientIdentifier: hugeId,
+        hashClientIdentifier: customHasher
+      });
+      const otherCustomKey = buildRateLimitKey({
+        method: 'GET',
+        route: '/test',
+        clientIdentifier: otherHugeId,
+        hashClientIdentifier: customHasher
+      });
+      assert.ok(customKey.split(':').at(-1).length <= MAX_IDENTIFIER_LENGTH);
+      assert.notEqual(customKey, otherCustomKey);
     });
 
     it('hashes sensitive identifiers using SHA-256 when hashClientIdentifier: true', () => {
@@ -395,7 +418,11 @@ describe('SmartRate v4 — Custom Key Generator & Multi-Tenant Keys', () => {
     });
 
     it('supports custom hash functions when passed to hashClientIdentifier', () => {
-      const customHasher = (id) => `custom_${id.substring(0, 5)}`;
+      let receivedIdentifier;
+      const customHasher = (id) => {
+        receivedIdentifier = id;
+        return `custom_${id.substring(0, 5)}`;
+      };
       const key = buildRateLimitKey({
         method: 'GET',
         route: '/custom',
@@ -403,6 +430,7 @@ describe('SmartRate v4 — Custom Key Generator & Multi-Tenant Keys', () => {
         hashClientIdentifier: customHasher
       });
       assert.equal(key, 'smartrate:GET:/custom:custom_my-se');
+      assert.equal(receivedIdentifier, 'my-sensitive-token');
     });
 
     it('validates hashClientIdentifier option in rateLimiter fail-fast', () => {
